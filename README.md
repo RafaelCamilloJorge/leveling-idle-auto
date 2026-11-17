@@ -7,10 +7,12 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 | Pontos de atributo | Status → **Distribuir pela build** (build escolhida) | Quando aparece o **+N** de pontos livres, e a cada 15 min |
 | Equipamento | Inventário → **Equipar melhores** (critério escolhido) | A cada 10 min |
 | Exército | Exército → **Montar melhor time** | A cada 30 min |
-| Área de caça | Caçadas → **★ Recomendada** → **Entrar no portal** (se não for a área atual e a Precisão não estiver no vermelho) | A cada 20 min e ao subir de nível |
+| Área de caça | Caçadas → **Entrar no portal** da melhor área permitida (sozinho: a **★ Recomendada**; em party: veja abaixo) | A cada 20 min e ao subir de nível |
 
-> Em party, trocar de área não tira a conta da party: ela passa a caçar "em outro lugar", e os
-> outros membros veem o botão "Ir para a caçada do grupo".
+> **Em party** a área precisa servir para todo mundo: o limite é o **menor nível** entre você e
+> os membros (lido no quadro da party). A extensão escolhe a maior área da trilha que começa até
+> esse nível, pulando as trancadas e as com Precisão no vermelho. Se essa já for a atual, fica.
+> Trocar de área não tira a conta da party.
 
 Tudo é configurável no botão **AUTO** que aparece no canto inferior esquerdo do jogo.
 
@@ -55,6 +57,9 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
 
 ## Histórico
 
+- **1.4.0** – Caçadas em party: respeita o menor nível da party. Lê a trilha pelos botões de área
+  do jogo (`.slAtlasNode`, com estado atual/liberada/trancada) e volta da ficha para a trilha na grade
+  do IdleDeck.
 - **1.2.1** – Caçadas: fecha o menu de categoria depois de usar; nome da área certo no log.
 - **1.2.0** – Caçadas: vai sozinho para a área "Recomendada" pelo jogo.
 - **1.1.0** – Exército: "Montar melhor time" automático.

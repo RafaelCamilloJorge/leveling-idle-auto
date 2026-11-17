@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.2.1
+// @version      1.4.0
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -40,6 +40,8 @@
     { id: 4, label: 'Defesa' },
     { id: 5, label: 'Vida' },
   ];
+
+  const DEBUG = false; // true: log detalhado da troca de área
 
   const DEFAULTS = {
     enabled: false,
@@ -368,25 +370,132 @@
   const CONFIRM_WORDS = /^(confirmar|entrar|sim|continuar|ok|trocar|ir)( |$)/;
 
   async function doHunt() {
-    if (!(await openHunts())) { log('Não consegui abrir as Caçadas.'); await closePanels(); return; }
-    await sleep(500);
-    // Se abriu em outra aba (Masmorras, Fenda...), volta para "Caçadas".
-    const tab = findButton((t) => t === 'cacadas');
-    if (tab) { click(tab); await sleep(400); }
+    // Lê a party antes de abrir o painel: na grade do IdleDeck o painel cobre os quadros.
+    const party = partyLevels();
+    const own0 = ownLevel();
 
-    const rec = await waitFor(huntRecBtn, 2500);
-    if (!rec) { log('Botão "Recomendada" não apareceu.'); await closePanels(); return; }
-    click(rec);
-    await sleep(900);
+    // Abre as Caçadas na aba "Caçadas" e espera a trilha (ou o "Recomendada") aparecer.
+    const openList = async () => {
+      if (!(await openHunts())) return false;
+      await sleep(500);
+      const tab = findButton((t) => t === 'cacadas'); // se abriu em Masmorras, Fenda...
+      if (tab) { click(tab); await sleep(400); }
+      await waitFor(() => huntAreaNodes().length || huntRecBtn(), 2500);
+      await showTrail();
+      return true;
+    };
+    if (!(await openList())) { log('Não consegui abrir as Caçadas.'); await closePanels(); return; }
 
-    // Sem "Entrar no portal" = a recomendada já é a área atual (mostra "Sair da caçada").
+    if (!party.length) {
+      // Sozinho: segue a "Recomendada" do jogo.
+      const rec = huntRecBtn();
+      if (!rec) { log('Botão "Recomendada" não apareceu.'); await closePanels(); return; }
+      click(rec);
+      await sleep(900);
+      const st = selectedAreaState();
+      if (DEBUG) log(`[caçada] sem party; recomendada: ${st}`);
+      if (st === 'enter') { await enterSelectedArea('recomendada'); return; }
+      if (st === 'precision') log('Área recomendada pede mais Precisão; fiquei na atual.');
+      await closePanels();
+      return;
+    }
+
+    // Em party: a área tem que abrir para todo mundo, então o limite é o menor nível
+    // entre você e os membros. A trilha já diz qual é a atual (live) e quais estão
+    // trancadas (locked). Lê tudo ANTES de clicar: na grade, ao escolher uma área o
+    // painel troca a trilha pela ficha dela.
+    const own = own0 || ownLevel();
+    const cap = Math.min(own || Infinity, ...party);
+    const nodes = huntAreaNodes();
+    const live = nodes.find((n) => n.state === 'live');
+    const wanted = nodes.filter((n) => n.start <= cap && n.state !== 'locked').sort((a, b) => b.start - a.start);
+    if (DEBUG) log(`[caçada] party ${party.join(',')}; eu ${own}; limite ${cap}; atual ${live ? `${live.start}-${live.end}` : '?'}; opções ${wanted.map((n) => `${n.start}-${n.end}`).join(' ') || 'nenhuma'}`);
+    if (!nodes.length) { log('Não achei a trilha de áreas nas Caçadas.'); await closePanels(); return; }
+
+    for (const w of wanted) {
+      if (w.state === 'live') { await closePanels(); return; } // a melhor área possível já é a atual
+      // Reabre a lista se a ficha de outra área tomou o lugar da trilha.
+      await showTrail();
+      let n = huntAreaNodes().find((x) => x.start === w.start && x.end === w.end);
+      if (!n) {
+        await closePanels();
+        if (!(await openList())) break;
+        n = huntAreaNodes().find((x) => x.start === w.start && x.end === w.end);
+        if (!n) continue;
+      }
+      click(n.el);
+      await sleep(800);
+      const st = selectedAreaState();
+      if (DEBUG) log(`[caçada] ${w.start}-${w.end}: ${st}`);
+      if (st === 'current') { await closePanels(); return; }
+      if (st === 'enter') { await enterSelectedArea(`menor nível da party: ${cap}`); return; }
+      // 'locked' ou 'precision': tenta a próxima área abaixo.
+    }
+    log(`Nenhuma área até o Nv ${cap} (menor da party) está aberta para mim.`);
+    await closePanels();
+  }
+
+  // Na grade, ao escolher uma área a ficha dela toma o lugar da trilha (e o painel
+  // reabre nela). O ✕ da ficha (button.slAtlasClose, "Voltar") traz a trilha de volta.
+  async function showTrail() {
+    if (huntAreaNodes().length) return true;
+    const back = [...document.querySelectorAll("button.slAtlasClose")].find(visible);
+    if (!back) return false;
+    click(back);
+    return !!(await waitFor(() => huntAreaNodes().length, 2500));
+  }
+
+  // Níveis dos outros membros da party (HUD: um .slPartyFrame por membro, com "Nv N").
+  function partyLevels() {
+    return [...document.querySelectorAll('.slPartyFrame')].filter(visible)
+      .map((f) => { const m = norm(f.innerText).match(/\bnv\.? ?(\d+)/); return m ? Number(m[1]) : null; })
+      .filter((n) => n !== null);
+  }
+
+  // Seu nível: o selo "Nível N" do painel Caçadas, o selo do cartão ou o texto do cartão.
+  function ownLevel() {
+    const chip = [...document.querySelectorAll('div, span, b, strong, small')].filter(visible)
+      .find((e) => /^nivel \d+$/.test(norm(e.innerText)));
+    if (chip) return Number(norm(chip.innerText).match(/\d+/)[0]);
+    const seal = document.querySelector('.slHudSeal');
+    const m = seal && norm(seal.innerText).match(/\d+/);
+    return m ? Number(m[0]) : readLevel();
+  }
+
+  // Áreas da trilha das Caçadas: cada uma é um button.slAtlasNode, com o nível em
+  // .slAtlasNodeLv / aria-label ("Orc Jovem · 21-25") e data-state = live (atual),
+  // available ou locked.
+  function huntAreaNodes() {
+    return [...document.querySelectorAll('button.slAtlasNode')]
+      .filter((b) => b.isConnected && b.getClientRects().length)
+      .map((b) => {
+        const lv = b.querySelector('.slAtlasNodeLv');
+        const t = `${lv ? lv.textContent : ''} ${b.getAttribute('aria-label') || ''}`;
+        const m = t.match(/(\d+)\s*[^\d\s]{1,3}\s*(\d+)/);
+        return m ? { el: b, start: Number(m[1]), end: Number(m[2]), state: b.dataset.state || '' } : null;
+      })
+      .filter(Boolean);
+  }
+
+  // Estado da área selecionada no detalhe das Caçadas.
+  function selectedAreaState() {
+    // Outra área aberta: o detalhe tem "Entrar no portal".
     const enter = findButton((t) => t === 'entrar no portal');
-    if (!enter || enter.disabled) { await closePanels(); return; }
+    if (enter) {
+      if (enter.disabled) return 'locked';
+      if ([...document.querySelectorAll('.slHuntAccBad')].some(visible)) return 'precision';
+      return 'enter';
+    }
+    // Sem "Entrar no portal": ou está selada ("Portal selado") ou é a área atual
+    // (o detalhe troca o botão por "Sair da caçada"). Não dá para contar os
+    // "Sair da caçada": na grade o HUD tem mais um com o mesmo nome.
+    const sealed = [...document.querySelectorAll('div, span, b, strong, p')].filter(visible)
+      .some((e) => e.children.length === 0 && norm(e.innerText) === 'portal selado');
+    return sealed ? 'locked' : 'current';
+  }
 
-    // Precisão abaixo da referência da área (quadro vermelho): não troca.
-    const accBad = [...document.querySelectorAll('.slHuntAccBad')].find(visible);
-    if (accBad) { log('Área recomendada pede mais Precisão; fiquei na atual.'); await closePanels(); return; }
-
+  async function enterSelectedArea(why) {
+    const enter = findButton((t) => t === 'entrar no portal');
     // Nome da área: o título logo acima da linha "Portal Azul · Nv 21-25" do detalhe.
     const title = (() => {
       const sub = [...document.querySelectorAll('div, span, small, p')].filter(visible)
@@ -394,7 +503,7 @@
       const prev = sub && (sub.previousElementSibling || sub.parentElement.previousElementSibling);
       const name = prev ? (prev.innerText || '').trim() : '';
       const where = sub ? (sub.innerText || '').trim() : '';
-      return name && name.length < 40 ? `${name} (${where})` : (where || 'área recomendada');
+      return name && name.length < 40 ? `${name} (${where})` : (where || 'área nova');
     })();
 
     const before = new Set(buttons());
@@ -410,7 +519,7 @@
       log(`Confirmei troca de área${msg ? ` ("${msg}")` : ''}.`);
       await sleep(1200);
     }
-    log(`Fui para a área recomendada: ${title}.`);
+    log(`Fui para ${title} (${why}).`);
     await sleep(800);
     await closePanels();
   }

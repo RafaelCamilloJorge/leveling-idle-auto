@@ -1,4 +1,4 @@
-# Leveling Idle – Auto Pontos, Equipar e Exército
+# Leveling Idle – Auto Pontos, Equipar, Exército e Caçada
 
 Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que automatiza tarefas repetitivas do [Leveling Idle 2D](https://levelingidle2d.com.br/jogar), clicando só nos botões que o próprio jogo já tem:
 
@@ -7,6 +7,10 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 | Pontos de atributo | Status → **Distribuir pela build** (build escolhida) | Quando aparece o **+N** de pontos livres, e a cada 15 min |
 | Equipamento | Inventário → **Equipar melhores** (critério escolhido) | A cada 10 min |
 | Exército | Exército → **Montar melhor time** | A cada 30 min |
+| Área de caça | Caçadas → **★ Recomendada** → **Entrar no portal** (se não for a área atual e a Precisão não estiver no vermelho) | A cada 20 min e ao subir de nível |
+
+> Em party, trocar de área não tira a conta da party: ela passa a caçar "em outro lugar", e os
+> outros membros veem o botão "Ir para a caçada do grupo".
 
 Tudo é configurável no botão **AUTO** que aparece no canto inferior esquerdo do jogo.
 
@@ -46,11 +50,13 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
   e `"version"` no `manifest.json`.
 - Teste no IdleDeck com **Recarregar da pasta** e confira o log no painel **AUTO**.
 - O jogo usa classes CSS como `.slHudPoints` (o "+N" de pontos), `.slInvBestBtn`
-  (Equipar melhores), `.slShBestBtn` (Montar melhor time) e `button.slGmItem` (itens do
+  (Equipar melhores), `.slShBestBtn` (Montar melhor time), `.slHuntAccBad` (Precisão insuficiente) e `button.slGmItem` (itens do
   Menu do Caçador). Se o jogo mudar, é por aí que algo quebra.
 
 ## Histórico
 
+- **1.2.1** – Caçadas: fecha o menu de categoria depois de usar; nome da área certo no log.
+- **1.2.0** – Caçadas: vai sozinho para a área "Recomendada" pelo jogo.
 - **1.1.0** – Exército: "Montar melhor time" automático.
 - **1.0.3** – Pontos: reage ao "+N" do cartão do personagem (o IdleDeck não mostra "Nível N").
 - **1.0.2** – Abre o Status pelo "+N"/selo de nível (no IdleDeck o menu Caçador some).

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.1.0
-// @description  Distribui pontos pela build, roda o "Equipar melhores" e o "Montar melhor time" do Exército, sozinho.
+// @version      1.2.1
+// @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
 // @grant        none
@@ -15,6 +15,7 @@
  *   - Status  -> "Distribuir pela build" (na build escolhida) -> confirma.
  *   - Inventário -> "Equipar melhores" (com o critério escolhido) -> confirma.
  *   - Exército -> "Montar melhor time".
+ *   - Caçadas -> "★ Recomendada" -> "Entrar no portal" (se não for a área atual).
  * Ele não manda nada diferente para o servidor.
  *
  * Painel: aparece um botão roxo "AUTO" no canto inferior esquerdo da tela do jogo.
@@ -51,6 +52,8 @@
     pointsEveryMin: 15,     // checa pontos a cada N minutos (além de quando o nível muda)
     autoTeam: true,         // roda o "Montar melhor time" do Exército
     teamEveryMin: 30,
+    autoHunt: true,         // vai para a área "Recomendada" pelo jogo nas Caçadas
+    huntEveryMin: 20,
     knownBuilds: [],
     log: [],
   };
@@ -180,42 +183,59 @@
   };
   const armyOpen = () => armyBestBtn() || [...document.querySelectorAll('.slShTeamGrid')].find(visible) || null;
 
-  // Item "Exército" do Menu do Caçador (button.slGmItem com rótulo .slGmItemLabel).
-  const armyMenuItem = (needVisible) => [...document.querySelectorAll('button.slGmItem')].find((b) => {
+  // Itens dos menus do jogo (button.slGmItem com rótulo .slGmItemLabel).
+  const menuItem = (labelRe, needVisible) => [...document.querySelectorAll('button.slGmItem')].find((b) => {
     const lbl = b.querySelector('.slGmItemLabel') || b;
-    return /^exercito\b/.test(norm(lbl.innerText || lbl.textContent)) && (!needVisible || visible(b));
+    return labelRe.test(norm(lbl.innerText || lbl.textContent)) && (!needVisible || visible(b));
   }) || null;
+  const anyMenuOpen = () => [...document.querySelectorAll('button.slGmItem')].some(visible);
+  let menuOpener = null; // botão que abriu o menu (clicar de novo fecha; Escape não fecha)
 
-  async function openArmy() {
-    if (armyOpen()) return true;
-    // 1) Abre o Menu do Caçador: no layout largo é a aba "CAÇADOR"; no estreito
-    //    (grade do IdleDeck) é o ícone que sobra dentro de .slHudMenu.
-    const opener = findButton((t) => /(^|\s)cacador$/.test(t) || t === 'cacador')
+  // Abre um painel pelo menu do jogo. No layout largo o menu tem abas por categoria
+  // ("CAÇADOR", "AVENTURA"...); no estreito (grade do IdleDeck) sobra um ícone
+  // dentro de .slHudMenu que abre o menu completo.
+  async function openFromGameMenu(labelRe, categoryRe, isOpen, hotkey) {
+    if (isOpen()) return true;
+    const opener = findButton((t) => categoryRe.test(t))
       || buttons(document.querySelector('.slHudMenu') || document.createElement('div'))[0];
     if (opener) {
+      menuOpener = opener;
       click(opener);
-      const item = await waitFor(() => armyMenuItem(true), 2500);
+      const item = await waitFor(() => menuItem(labelRe, true), 2500);
       if (item) {
         click(item);
-        if (await waitFor(armyOpen, 4000)) return true;
+        if (await waitFor(isOpen, 4000)) return true;
       }
+      if (anyMenuOpen()) { pressKey('Escape', 'Escape'); await sleep(300); }
     }
-    // 2) Item do menu já existe, mesmo escondido: o clique dispara o mesmo atalho.
-    const hidden = armyMenuItem(false);
+    // Item do menu já existe, mesmo escondido: o clique dispara o mesmo atalho.
+    const hidden = menuItem(labelRe, false);
     if (hidden) {
       hidden.click();
-      if (await waitFor(armyOpen, 3000)) return true;
+      if (await waitFor(isOpen, 3000)) return true;
     }
-    // 3) Atalho de teclado do jogo.
-    pressKey('h', 'KeyH');
-    return !!(await waitFor(armyOpen, 3000));
+    if (hotkey) pressKey(hotkey[0], hotkey[1]);
+    return !!(await waitFor(isOpen, 3000));
   }
+
+  const armyMenuItem = (needVisible) => menuItem(/^exercito\b/, needVisible);
+  const openArmy = () => openFromGameMenu(/^exercito\b/, /(^|\s)cacador$/, armyOpen, ['h', 'KeyH']);
+
+  // Caçadas: painel com o botão "★ Recomendada" e o "Entrar no portal" da área escolhida.
+  const huntRecBtn = () => findButton((t) => t.length < 20 && /recomendada$/.test(t));
+  const huntsOpen = () => huntRecBtn();
+  const openHunts = () => openFromGameMenu(/^cacadas\b/, /(^|\s)aventura$/, huntsOpen, ['m', 'KeyM']);
 
   async function closePanels() {
     for (let i = 0; i < 3; i++) {
-      if (!statusOpen() && !invOpen() && !armyOpen() && !armyMenuItem(true)) return;
+      if (!statusOpen() && !invOpen() && !armyOpen() && !huntsOpen()) break;
       pressKey('Escape', 'Escape');
       await sleep(350);
+    }
+    // O menu suspenso de categoria (CAÇADOR, AVENTURA...) fecha clicando no botão de novo.
+    if (anyMenuOpen() && menuOpener && visible(menuOpener)) {
+      click(menuOpener);
+      await sleep(300);
     }
   }
 
@@ -343,6 +363,59 @@
   }
 
   // ---------------------------------------------------------------------------
+  // 4) Caçadas: ir para a área "Recomendada" pelo jogo
+  // ---------------------------------------------------------------------------
+  const CONFIRM_WORDS = /^(confirmar|entrar|sim|continuar|ok|trocar|ir)( |$)/;
+
+  async function doHunt() {
+    if (!(await openHunts())) { log('Não consegui abrir as Caçadas.'); await closePanels(); return; }
+    await sleep(500);
+    // Se abriu em outra aba (Masmorras, Fenda...), volta para "Caçadas".
+    const tab = findButton((t) => t === 'cacadas');
+    if (tab) { click(tab); await sleep(400); }
+
+    const rec = await waitFor(huntRecBtn, 2500);
+    if (!rec) { log('Botão "Recomendada" não apareceu.'); await closePanels(); return; }
+    click(rec);
+    await sleep(900);
+
+    // Sem "Entrar no portal" = a recomendada já é a área atual (mostra "Sair da caçada").
+    const enter = findButton((t) => t === 'entrar no portal');
+    if (!enter || enter.disabled) { await closePanels(); return; }
+
+    // Precisão abaixo da referência da área (quadro vermelho): não troca.
+    const accBad = [...document.querySelectorAll('.slHuntAccBad')].find(visible);
+    if (accBad) { log('Área recomendada pede mais Precisão; fiquei na atual.'); await closePanels(); return; }
+
+    // Nome da área: o título logo acima da linha "Portal Azul · Nv 21-25" do detalhe.
+    const title = (() => {
+      const sub = [...document.querySelectorAll('div, span, small, p')].filter(visible)
+        .find((e) => e.children.length === 0 && /^portal .+ nv \d+\s*[-–]\s*\d+$/.test(norm(e.innerText).replace(/[·•]/g, '')));
+      const prev = sub && (sub.previousElementSibling || sub.parentElement.previousElementSibling);
+      const name = prev ? (prev.innerText || '').trim() : '';
+      const where = sub ? (sub.innerText || '').trim() : '';
+      return name && name.length < 40 ? `${name} (${where})` : (where || 'área recomendada');
+    })();
+
+    const before = new Set(buttons());
+    click(enter);
+    await sleep(1200);
+
+    // Se o jogo pedir confirmação (party, etc.), confirma só no diálogo novo.
+    const confirm = buttons().find((b) => !before.has(b) && CONFIRM_WORDS.test(norm(b.innerText)));
+    if (confirm) {
+      const box = confirm.closest('[role="dialog"], [class*="Modal"], [class*="Confirm"], [class*="Dialog"]');
+      const msg = norm(box ? box.innerText : '').slice(0, 140);
+      click(confirm);
+      log(`Confirmei troca de área${msg ? ` ("${msg}")` : ''}.`);
+      await sleep(1200);
+    }
+    log(`Fui para a área recomendada: ${title}.`);
+    await sleep(800);
+    await closePanels();
+  }
+
+  // ---------------------------------------------------------------------------
   // Loop
   // ---------------------------------------------------------------------------
   let running = false;
@@ -350,6 +423,7 @@
   let lastEquip = 0;
   let lastPoints = 0;
   let lastTeam = 0;
+  let lastHunt = 0;
 
   function readLevel() {
     const card = document.querySelector('.slHudCard');
@@ -392,6 +466,10 @@
       if (cfg.autoTeam && (force || now - lastTeam > cfg.teamEveryMin * 60000)) {
         lastTeam = now;
         await doTeam();
+      }
+      if (cfg.autoHunt && (force || levelUp || now - lastHunt > cfg.huntEveryMin * 60000)) {
+        lastHunt = now;
+        await doHunt();
       }
     } catch (e) {
       log('Erro: ' + (e && e.message ? e.message : e));
@@ -464,6 +542,9 @@
         <h4>Exército</h4>
         <label>Montar melhor time sozinho<input type="checkbox" data-k="autoTeam"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="teamEveryMin"></label>
+        <h4>Caçada</h4>
+        <label>Ir para a área recomendada<input type="checkbox" data-k="autoHunt"></label>
+        <label>Checar a cada (min)<input type="number" min="5" max="240" data-k="huntEveryMin"></label>
         <div class="row"><button data-act="now">Rodar agora</button><button data-act="clear">Limpar log</button></div>
         <pre></pre>
       </div>
@@ -488,7 +569,7 @@
         saveCfg();
         paintFab();
         setStatus(cfg.enabled ? 'ligado' : 'desligado');
-        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; tick(false); }
+        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; tick(false); }
       });
       // não deixar as teclas do painel virarem atalho do jogo
       el.addEventListener('keydown', (e) => e.stopPropagation());

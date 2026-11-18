@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.7.1
+// @version      1.8.0
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -65,6 +65,12 @@
     expedEveryMin: 20,
     autoEnchant: true,      // encanta as peças vestidas só enquanto for "Garantido" (até +5)
     enchantEveryMin: 30,
+    deathGuard: true,       // depois de mortes seguidas, caça uma área abaixo por um tempo
+    deathLimit: 2,          // mortes...
+    deathWindowMin: 15,     // ...dentro desta janela
+    deathPauseMin: 60,      // por quanto tempo fica na área de baixo
+    deaths: [],
+    huntPauseUntil: 0,
     talentPlanSeen: '',
     knownBuilds: [],
     log: [],
@@ -141,6 +147,7 @@
   // Algum diálogo/janela do jogo bloqueando? (teste de promoção, confirmação, etc.)
   function isBusyScene() {
     const t = norm(document.body.innerText).slice(0, 20000);
+    if (visible(document.querySelector('.slHudDeath'))) return true; // morto: espera voltar
     return /teste de promocao em andamento|chefe diario em andamento/.test(t);
   }
 
@@ -746,7 +753,10 @@
     };
     if (!(await openList())) { log('Não consegui abrir as Caçadas.'); await closePanels(); return; }
 
-    if (!party.length) {
+    // Trava de morte ativa: usa a trilha com o limite 5 níveis abaixo (uma área a menos).
+    const guardOn = cfg.deathGuard && Date.now() < (cfg.huntPauseUntil || 0);
+
+    if (!party.length && !guardOn) {
       // Sozinho: segue a "Recomendada" do jogo.
       const rec = huntRecBtn();
       if (!rec) { log('Botão "Recomendada" não apareceu.'); await closePanels(); return; }
@@ -765,7 +775,8 @@
     // trancadas (locked). Lê tudo ANTES de clicar: na grade, ao escolher uma área o
     // painel troca a trilha pela ficha dela.
     const own = own0 || ownLevel();
-    const cap = Math.min(own || Infinity, ...party);
+    const cap = Math.min(own || Infinity, ...party) - (guardOn ? 5 : 0);
+    if (!Number.isFinite(cap)) { log('Não consegui ler o meu nível nas Caçadas.'); await closePanels(); return; }
     const nodes = huntAreaNodes();
     const live = nodes.find((n) => n.state === 'live');
     const wanted = nodes.filter((n) => n.start <= cap && n.state !== 'locked').sort((a, b) => b.start - a.start);
@@ -788,10 +799,15 @@
       const st = selectedAreaState();
       if (DEBUG) log(`[caçada] ${w.start}-${w.end}: ${st}`);
       if (st === 'current') { await closePanels(); return; }
-      if (st === 'enter') { await enterSelectedArea(`menor nível da party: ${cap}`); return; }
+      if (st === 'enter') {
+        await enterSelectedArea(guardOn
+          ? `trava de morte até ${new Date(cfg.huntPauseUntil).toLocaleTimeString()}`
+          : `menor nível da party: ${cap}`);
+        return;
+      }
       // 'locked' ou 'precision': tenta a próxima área abaixo.
     }
-    log(`Nenhuma área até o Nv ${cap} (menor da party) está aberta para mim.`);
+    log(`Nenhuma área até o Nv ${cap}${guardOn ? ' (trava de morte)' : ' (menor da party)'} está aberta para mim.`);
     await closePanels();
   }
 
@@ -979,6 +995,41 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Trava de morte: conta as mortes (tela .slHudDeath do jogo). Com N mortes dentro
+  // da janela, a caçada passa a usar uma área abaixo por um tempo. Também fecha o
+  // aviso "Seu caçador morreu" depois que o caçador volta para a cidade.
+  // ---------------------------------------------------------------------------
+  let wasDead = false;
+  function deathWatch() {
+    if (!document.querySelector('.slHudCard')) return;
+    const dead = visible(document.querySelector('.slHudDeath'));
+    if (dead && !wasDead) {
+      const now = Date.now();
+      const win = Math.max(1, cfg.deathWindowMin) * 60000;
+      cfg.deaths = (cfg.deaths || []).filter((t) => now - t < win);
+      cfg.deaths.push(now);
+      saveCfg();
+      log(`Morri (${cfg.deaths.length} em ${cfg.deathWindowMin} min).`);
+      if (cfg.enabled && cfg.deathGuard && cfg.deaths.length >= Math.max(1, cfg.deathLimit)) {
+        cfg.huntPauseUntil = now + Math.max(5, cfg.deathPauseMin) * 60000;
+        cfg.deaths = [];
+        saveCfg();
+        lastHunt = 0; // a próxima rodada já desce de área
+        log(`Trava de morte: ${cfg.deathLimit} mortes seguidas. Caço uma área abaixo até ${new Date(cfg.huntPauseUntil).toLocaleTimeString()}.`);
+      }
+    }
+    wasDead = dead;
+    if (!dead && cfg.enabled) {
+      const pop = [...document.querySelectorAll('.slHudPopupLoss')].find((p) => visible(p) && /morreu/.test(norm(p.innerText)));
+      if (pop) {
+        const ok = buttons(pop.closest('.slHudPopups') || pop).find((b) => /^entendi\b/.test(norm(b.innerText)));
+        if (ok) click(ok);
+      }
+    }
+  }
+  setInterval(deathWatch, 2000);
+
   // Checa a cada ~20 s se o nível mudou; as ações em si respeitam os intervalos.
   (async function loop() {
     for (;;) {
@@ -1070,6 +1121,9 @@
         <h4>Caçada</h4>
         <label>Ir para a área recomendada<input type="checkbox" data-k="autoHunt"></label>
         <label>Checar a cada (min)<input type="number" min="5" max="240" data-k="huntEveryMin"></label>
+        <label>Descer de área após mortes<input type="checkbox" data-k="deathGuard"></label>
+        <label>Mortes em 15 min para descer<input type="number" min="1" max="10" data-k="deathLimit"></label>
+        <label>Ficar na área de baixo (min)<input type="number" min="5" max="480" data-k="deathPauseMin"></label>
         <div class="row"><button data-act="now">Rodar agora</button><button data-act="clear">Limpar log</button></div>
         <pre></pre>
       </div>

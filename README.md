@@ -19,6 +19,11 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 > os membros (lido no quadro da party). A extensão escolhe a maior área da trilha que começa até
 > esse nível, pulando as trancadas e as com Precisão no vermelho. Se essa já for a atual, fica.
 > Trocar de área não tira a conta da party.
+>
+> **Trava de morte:** com 2 mortes em 15 min, a extensão passa a caçar **uma área abaixo** (limite
+> 5 níveis menor) por 60 min e depois volta para a área normal. Ela também fecha o aviso
+> "Seu caçador morreu" e não mexe em nada enquanto o caçador está caído. Não impede o líder da
+> party de puxar o grupo de volta.
 
 Tudo é configurável no botão **AUTO** que aparece no canto inferior esquerdo do jogo.
 
@@ -102,6 +107,9 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
   Menu do Caçador). Se o jogo mudar, é por aí que algo quebra.
 
 ## Histórico
+
+- **1.8.0** – Trava de morte: conta as mortes e, com 2 em 15 min, caça uma área abaixo por 60 min
+  (configurável no painel). Fecha o aviso de morte e pausa as ações enquanto o caçador está caído.
 
 - **1.7.1** – Encantar: encanta sozinho as peças vestidas na Forja, só enquanto o jogo marca a
   tentativa como "Garantido" (até +5, sem risco). Acima disso a falha gasta a pedra, então fica

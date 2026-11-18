@@ -14,7 +14,7 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 | Missões | Missões → **Resgatar** (Jornada do Caçador e objetivos diários prontos) | A cada 15 min |
 | Recompensa Diária | Recompensas Diárias → **Resgatar** | A cada 15 min |
 | Correio | Correio → **Reivindicar tudo** (e de novo ~1 min depois de resgatar a Diária) | A cada 15 min |
-| Loja do Brok | Sai da caçada, anda até o **Brok** em Seul (setas + **E**), completa **Poção Grande**, **Poção de Mana Grande** e **Reviver Grande** até a meta, respeitando uma reserva de ouro, e volta para a caçada | A cada 6 h, ou logo que a conta estiver na cidade (ex.: depois de morrer) |
+| Loja do Brok | Sai da caçada, anda até o **Brok** em Seul (setas + **E**), completa **Poção Grande**, **Poção de Mana Grande**, **Reviver Grande** e **Essência de Extração** até a meta, respeitando uma reserva de ouro, e volta para a caçada | A cada 6 h, ou logo que a conta estiver na cidade (ex.: depois de morrer) |
 
 > **Em party** a área precisa servir para todo mundo: o limite é o **menor nível** entre você e
 > os membros (lido no quadro da party). A extensão escolhe a maior área da trilha que começa até
@@ -115,6 +115,11 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
   Menu do Caçador). Se o jogo mudar, é por aí que algo quebra.
 
 ## Histórico
+
+- **1.12.0** – Loja do Brok: também completa a **Essência de Extração** (aba Essências, meta padrão 1.000, máx.
+  2.000 por visita), para o Auto-ARISE não parar por falta de essência.
+- **1.11.1** – EXP/h: ao voltar da cidade (Brok, morte) segue a medição de onde parou, em vez de voltar para a
+  área de cima e recomeçar (trocava de mapa a cada volta).
 
 - **1.11.0** – Sombras: depois do "Montar melhor time", roda o **Equipar melhores** em cada sombra do time e usa a
   vaga 6 para treinar a sombra de fora com multiplicadores melhores (rank, Desperta, qualidade, Monarca), que

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.11.0
+// @version      1.12.0
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -82,6 +82,7 @@
     shopHp: 300,            // Poção Grande
     shopMp: 100,            // Poção de Mana Grande
     shopRevive: 20,         // Reviver Grande
+    shopEssence: 1000,      // Essência de Extração (ARISE), 1 de ouro cada
     shopGoldReserve: 20000, // nunca deixa o ouro cair abaixo disto
     lastShop: 0,
     deaths: [],
@@ -942,7 +943,8 @@
       }
     }
     saveCfg();
-    const goal = t.win || (t.recXph == null || !r ? t.rec : t.low);
+    // Na cidade (Brok, morte) não há EXP/h: segue a medição de onde parou. Só sem HUD *dentro* da caçada fica em R.
+    const goal = t.win || (t.recXph == null || (here && !r) ? t.rec : t.low);
     if (here === goal) { await closePanels(); return true; }
     const toR = goal === t.rec;
     if ((await selectNode(toR ? R : L)) !== 'enter') {
@@ -1187,6 +1189,14 @@
       if (!(target > 0)) continue;
       const n = await buyItem(name, target);
       if (n) done.push(`${n} ${name}`);
+    }
+    // As essências ficam na aba própria da loja; a compra rápida vai de 50 em 50 (máx. 2.000 por visita).
+    const essTab = document.querySelector('.slTab[data-tab="essences"]');
+    if (cfg.shopEssence > 0 && essTab) {
+      click(essTab);
+      await sleep(400);
+      const n = await buyItem('Essência de Extração', cfg.shopEssence);
+      if (n) done.push(`${n} Essência de Extração`);
     }
     log(done.length ? `Loja do Brok: comprei ${done.join(', ')}.` : 'Loja do Brok: estoque já estava completo.');
     pressKey('Escape', 'Escape');
@@ -1455,11 +1465,12 @@
         <label>Mortes em 15 min para descer<input type="number" min="1" max="10" data-k="deathLimit"></label>
         <label>Ficar na área de baixo (min)<input type="number" min="5" max="480" data-k="deathPauseMin"></label>
         <h4>Loja do Brok</h4>
-        <label>Comprar poções e Revivers<input type="checkbox" data-k="autoShop"></label>
+        <label>Comprar poções, Revivers e essências<input type="checkbox" data-k="autoShop"></label>
         <label>A cada (horas)<input type="number" min="1" max="48" data-k="shopEveryHours"></label>
         <label>Poção Grande (manter)<input type="number" min="0" max="5000" data-k="shopHp"></label>
         <label>Mana Grande (manter)<input type="number" min="0" max="5000" data-k="shopMp"></label>
         <label>Reviver Grande (manter)<input type="number" min="0" max="500" data-k="shopRevive"></label>
+        <label>Essência de Extração (manter)<input type="number" min="0" max="2000" data-k="shopEssence"></label>
         <label>Reserva de ouro<input type="number" min="0" max="99999999" data-k="shopGoldReserve"></label>
         <div class="row"><button data-act="now">Rodar agora</button><button data-act="shop">Comprar agora</button><button data-act="clear">Limpar log</button></div>
         <pre></pre>

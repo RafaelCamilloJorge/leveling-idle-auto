@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Leveling Idle - Auto Pontos, Equipar e Exercito",
-  "version": "1.11.0",
-  "description": "Distribui pontos e talentos pela build, equipa os melhores itens, monta o melhor time do Exercito vai para a area recomendada, resgata recompensas, manda expedicoes e compra pocoes no Brok.",
+  "version": "1.12.0",
+  "description": "Distribui pontos e talentos pela build, equipa os melhores itens, monta o melhor time do Exercito vai para a area recomendada, resgata recompensas, manda expedicoes e compra pocoes e essencias no Brok.",
   "content_scripts": [
     {
       "matches": ["https://levelingidle2d.com.br/jogar*"],

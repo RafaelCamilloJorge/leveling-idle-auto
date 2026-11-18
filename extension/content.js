@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.10.0
+// @version      1.11.0
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -58,6 +58,8 @@
     pointsEveryMin: 15,     // checa pontos a cada N minutos (além de quando o nível muda)
     autoTeam: true,         // roda o "Montar melhor time" do Exército
     teamEveryMin: 30,
+    shadowGear: true,       // "Equipar melhores" em cada sombra do time
+    shadowTrainee: true,    // vaga 6 para a sombra de fora com multiplicadores melhores (para upar)
     autoHunt: true,         // vai para a área "Recomendada" pelo jogo nas Caçadas
     huntEveryMin: 20,
     expCompare: true,       // sozinho: mede o EXP/h da recomendada e da área logo abaixo e fica na melhor
@@ -470,11 +472,78 @@
     }
     const best = armyBestBtn();
     if (!best) { log('Botão "Montar melhor time" não apareceu.'); await closePanels(); return; }
-    if (best.disabled) { log('Time já é o melhor.'); await closePanels(); return; }
-    click(best);
-    log('Montei o melhor time do Exército.');
-    await sleep(1200);
+    if (best.disabled) log('Time já é o melhor.');
+    else { click(best); log('Montei o melhor time do Exército.'); await sleep(1200); }
+    if (cfg.shadowTrainee) await trainSlot();
+    if (cfg.shadowGear) await gearTeam();
     await closePanels();
+  }
+
+  // Cards do time (aba Time): .slShTCard com o número da vaga em .slShTCardSlot; vaga vazia = .slShTCardEmpty.
+  const teamCard = (slot) => [...document.querySelectorAll('.slShTeamGrid .slShTCard')]
+    .find((c) => norm(c.querySelector('.slShTCardSlot')?.textContent) === String(slot));
+  const teamSideBtn = (label) => waitFor(() => [...document.querySelectorAll('.slShTeamSide button')]
+    .find((b) => visible(b) && norm(b.innerText) === label), 2000);
+
+  // Multiplicadores fixos da sombra que aparecem no card (wiki: rank, Desperta, Potencial pela
+  // qualidade, especialização Monarca). O nível não entra: ele sobe sozinho no time.
+  // shortcut: a origem do corpo (×1 a ×2) não aparece no card e fica de fora da conta.
+  const RANK_MULT = { normal: 1, elite: 1.25, cavaleiro: 1.6, 'cavaleiro de elite': 2, general: 2.6, marechal: 3.3, 'grande marechal': 4.2 };
+  const QUALITY_MULT = { bruta: 1, refinada: 1.1, superior: 1.25, perfeita: 1.35, absoluta: 1.45 };
+  function shadowMult(el) {
+    const t = (sel) => norm(el.querySelector(sel)?.textContent).replace(/[\d.,]/g, '').trim();
+    return (RANK_MULT[t('.slShRank')] || 1) * (QUALITY_MULT[t('.slShQ')] || 1)
+      * (el.querySelector('.slShAwake') ? 1.2 : 1) * (el.querySelector('.slShSpecRare') ? 1.05 : 1);
+  }
+
+  // Vaga de treino: o "Montar melhor time" olha só o poder de agora, então uma sombra de nível
+  // baixo com multiplicadores melhores nunca entra para upar. Troca a vaga 6 pela de fora do time
+  // com o maior multiplicador (10% acima da que sai). A lista do jogo mostra as 40 mais fortes.
+  async function trainSlot() {
+    const last = teamCard(6);
+    if (!last || last.classList.contains('slShTCardEmpty')) return; // time incompleto: o "Montar melhor time" resolve
+    const outMult = shadowMult(last);
+    click(last);
+    const rm = await teamSideBtn('tirar do time');
+    if (!rm) return;
+    click(rm);
+    const empty = await waitFor(() => (teamCard(6)?.classList.contains('slShTCardEmpty') ? teamCard(6) : null), 3000);
+    if (!empty) return;
+    click(empty);
+    await waitFor(() => document.querySelector('.slShSwap .slShSwapCard'), 4000);
+    const pick = [...document.querySelectorAll('.slShSwap .slShSwapCard')]
+      .map((el) => ({ el, mult: shadowMult(el), power: num(el.querySelector('.slShPower')?.textContent) }))
+      .filter((c) => c.mult >= outMult * 1.1)
+      .sort((a, b) => b.mult - a.mult || b.power - a.power)[0];
+    if (pick) { // a lista do jogo já esconde as sombras fora do seu comando
+      const name = (pick.el.querySelector('.slShSwapName')?.textContent || 'sombra').trim();
+      click(pick.el);
+      await waitFor(() => !teamCard(6)?.classList.contains('slShTCardEmpty'), 3000);
+      log(`Sombras: ${name} entrou na vaga 6 para treinar (×${pick.mult.toFixed(2)} contra ×${outMult.toFixed(2)}).`);
+      return;
+    }
+    const cancel = [...document.querySelectorAll('.slShSwap button')].find((b) => visible(b) && norm(b.innerText) === 'cancelar');
+    if (cancel) { click(cancel); await sleep(400); }
+    // Sem sombra melhor: o "Montar melhor time" devolve a vaga 6.
+    const best = await waitFor(() => { const b = armyBestBtn(); return b && !b.disabled ? b : null; }, 2000);
+    if (best) { click(best); await sleep(1200); }
+  }
+
+  // "Equipar melhores" de cada sombra do time (só funciona com a sombra no time).
+  async function gearTeam() {
+    let done = 0;
+    for (let slot = 1; slot <= 6; slot++) {
+      const card = teamCard(slot);
+      if (!card || card.classList.contains('slShTCardEmpty')) continue;
+      click(card);
+      const btn = await waitFor(() => [...document.querySelectorAll('.slShTeamSide section.slShEquip button')]
+        .find((b) => visible(b) && norm(b.innerText) === 'equipar melhores'), 2000);
+      if (!btn || btn.disabled) continue;
+      click(btn);
+      done++;
+      await sleep(jitter(800));
+    }
+    if (done) log(`Sombras: rodei "Equipar melhores" em ${done} sombra(s) do time.`);
   }
 
   // ---------------------------------------------------------------------------
@@ -1307,6 +1376,25 @@
     }
   }
 
+  // No IdleDeck o menu nativo do <select> abre atrás do painel. Então mostra um botão com o
+  // valor escolhido e abre a lista (o próprio <select size>) por cima, dentro do painel.
+  function dropdown(sel) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'dd';
+    const sync = () => { btn.textContent = `${sel.selectedOptions[0]?.textContent || '—'} ▾`; };
+    const close = () => { sel.classList.remove('show'); sync(); };
+    btn.addEventListener('click', () => {
+      for (const s of document.querySelectorAll('#lvlAutoRoot select.show')) if (s !== sel) s.classList.remove('show');
+      sel.classList.toggle('show');
+    });
+    sel.addEventListener('change', close);
+    sel.addEventListener('click', close); // clicar na opção que já estava escolhida também fecha
+    new MutationObserver(sync).observe(sel, { childList: true }); // as listas de build são recriadas
+    sel.before(btn);
+    sync();
+  }
+
   function buildPanel() {
     const root = document.createElement('div');
     root.id = 'lvlAutoRoot';
@@ -1317,8 +1405,12 @@
         #lvlAutoRoot .fab.on{background:#2ecc71;color:#06210f}
         #lvlAutoRoot .box{display:none;margin-bottom:6px;width:280px;max-width:calc(100vw - 24px);max-height:calc(100vh - 64px);overflow-y:auto;box-sizing:border-box;background:#15121f;border:1px solid #4b3a8a;border-radius:8px;padding:10px;box-shadow:0 4px 16px #000a}
         #lvlAutoRoot.open .box{display:block}
-        #lvlAutoRoot label{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0}
-        #lvlAutoRoot select,#lvlAutoRoot input[type=number]{background:#221c33;color:#eee;border:1px solid #4b3a8a;border-radius:4px;padding:2px 4px;max-width:150px}
+        #lvlAutoRoot label{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0;position:relative}
+        #lvlAutoRoot .dd{background:#221c33;color:#eee;border:1px solid #4b3a8a;border-radius:4px;padding:2px 6px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;text-align:left}
+        #lvlAutoRoot select[size]{display:none;position:absolute;right:0;top:100%;z-index:1;width:180px;max-width:none;box-shadow:0 4px 12px #000c}
+        #lvlAutoRoot select[size].show{display:block}
+        #lvlAutoRoot option:checked{background:#7c4dff linear-gradient(#7c4dff,#7c4dff);color:#fff}
+        #lvlAutoRoot select,#lvlAutoRoot input[type=number]{height:auto;background:#221c33;color:#eee;border:1px solid #4b3a8a;border-radius:4px;padding:2px 4px;max-width:150px}
         #lvlAutoRoot input[type=number]{width:56px}
         #lvlAutoRoot h4{margin:8px 0 2px;font-size:11px;letter-spacing:.06em;color:#b9a7ff;text-transform:uppercase}
         #lvlAutoRoot .row{display:flex;gap:6px;margin-top:8px}
@@ -1331,22 +1423,24 @@
         <div>Status: <span class="st"></span></div>
         <h4>Pontos de atributo</h4>
         <label>Distribuir sozinho<input type="checkbox" data-k="autoPoints"></label>
-        <label>Build<select data-k="buildName"></select></label>
+        <label>Build<select size="4" data-k="buildName"></select></label>
         <label>Mínimo de pontos<input type="number" min="1" max="500" data-k="minPoints"></label>
         <label>Checar a cada (min)<input type="number" min="2" max="240" data-k="pointsEveryMin"></label>
         <h4>Talentos</h4>
         <label>Investir sozinho<input type="checkbox" data-k="autoTalents"></label>
-        <label>Plano<select data-k="talentBuild"></select></label>
+        <label>Plano<select size="4" data-k="talentBuild"></select></label>
         <label>Checar a cada (min)<input type="number" min="5" max="240" data-k="talentsEveryMin"></label>
         <h4>Equipamento</h4>
         <label>Equipar melhores sozinho<input type="checkbox" data-k="autoEquip"></label>
-        <label>Critério<select data-k="criterion">${CRITERIA.map((c) => `<option value="${c.id}">${c.label}</option>`).join('')}</select></label>
+        <label>Critério<select size="4" data-k="criterion">${CRITERIA.map((c) => `<option value="${c.id}">${c.label}</option>`).join('')}</select></label>
         <label>A cada (min)<input type="number" min="2" max="240" data-k="equipEveryMin"></label>
         <label>Encantar vestidas (só garantido)<input type="checkbox" data-k="autoEnchant"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="enchantEveryMin"></label>
         <h4>Exército</h4>
         <label>Montar melhor time sozinho<input type="checkbox" data-k="autoTeam"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="teamEveryMin"></label>
+        <label>Equipar melhores nas sombras<input type="checkbox" data-k="shadowGear"></label>
+        <label>Vaga 6 para treinar sombra<input type="checkbox" data-k="shadowTrainee"></label>
         <h4>Recompensas</h4>
         <label>Resgatar Missões, Diária e Correio<input type="checkbox" data-k="autoRewards"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="rewardsEveryMin"></label>
@@ -1397,6 +1491,7 @@
       // não deixar as teclas do painel virarem atalho do jogo
       el.addEventListener('keydown', (e) => e.stopPropagation());
     }
+    for (const s of root.querySelectorAll('select')) dropdown(s); // depois do valor salvo, para o botão já mostrar a escolha
     root.querySelector('[data-act="now"]').addEventListener('click', () => tick(true));
     root.querySelector('[data-act="shop"]').addEventListener('click', async () => {
       if (running) return;

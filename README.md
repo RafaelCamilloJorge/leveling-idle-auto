@@ -8,7 +8,7 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 | Talentos | Árvore de Talentos → aprende 1 nível por vez (duplo clique) seguindo o plano da build | A cada 20 min, quando há pontos |
 | Equipamento | Inventário → **Equipar melhores** (critério escolhido) | A cada 10 min |
 | Encantar | Forja → Encantamento, filtro **Só vestidas** + **Só as que ainda sobem** → **Encantar para +N**, só quando a tentativa é **Garantido** (100%, até +5). Para quando acaba a pedra ou o ouro | A cada 30 min |
-| Exército | Exército → **Montar melhor time** | A cada 30 min |
+| Exército | Exército → **Montar melhor time**, **Equipar melhores** em cada sombra do time e vaga 6 de treino | A cada 30 min |
 | Área de caça | Caçadas → **Entrar no portal** da melhor área permitida (sozinho: a **★ Recomendada** ou a logo abaixo, a que render mais EXP/h; em party: veja abaixo) | A cada 20 min e ao subir de nível |
 | Expedições | Exército → Expedições → **Coletar tudo** e manda Sombras **só do Armazém** (nunca do time) no destino mais alto que cada uma aguenta | A cada 20 min |
 | Missões | Missões → **Resgatar** (Jornada do Caçador e objetivos diários prontos) | A cada 15 min |
@@ -115,6 +115,13 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
   Menu do Caçador). Se o jogo mudar, é por aí que algo quebra.
 
 ## Histórico
+
+- **1.11.0** – Sombras: depois do "Montar melhor time", roda o **Equipar melhores** em cada sombra do time e usa a
+  vaga 6 para treinar a sombra de fora com multiplicadores melhores (rank, Desperta, qualidade, Monarca), que
+  o jogo não escolhe por ter nível baixo. A origem do corpo não aparece na lista e fica de fora da conta.
+
+- **1.10.1** – Build, Plano e Critério do painel AUTO abrem a lista por cima do painel (menu próprio), porque no
+  IdleDeck o menu abria atrás do painel.
 
 - **1.10.0** – Build padrão por classe (Destruidor, Lâmina Letal, Rajada Arcana, Chuva de Flechas, Julgador)
   quando o painel fica em "Build padrão da classe". Rajada Arcana e Cruzado aprendem Estilhaçar / Luz Punitiva

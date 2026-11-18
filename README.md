@@ -9,7 +9,7 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 | Equipamento | Inventário → **Equipar melhores** (critério escolhido) | A cada 10 min |
 | Encantar | Forja → Encantamento, filtro **Só vestidas** + **Só as que ainda sobem** → **Encantar para +N**, só quando a tentativa é **Garantido** (100%, até +5). Para quando acaba a pedra ou o ouro | A cada 30 min |
 | Exército | Exército → **Montar melhor time** | A cada 30 min |
-| Área de caça | Caçadas → **Entrar no portal** da melhor área permitida (sozinho: a **★ Recomendada**; em party: veja abaixo) | A cada 20 min e ao subir de nível |
+| Área de caça | Caçadas → **Entrar no portal** da melhor área permitida (sozinho: a **★ Recomendada** ou a logo abaixo, a que render mais EXP/h; em party: veja abaixo) | A cada 20 min e ao subir de nível |
 | Expedições | Exército → Expedições → **Coletar tudo** e manda Sombras **só do Armazém** (nunca do time) no destino mais alto que cada uma aguenta | A cada 20 min |
 | Missões | Missões → **Resgatar** (Jornada do Caçador e objetivos diários prontos) | A cada 15 min |
 | Recompensa Diária | Recompensas Diárias → **Resgatar** | A cada 15 min |
@@ -115,6 +115,15 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
   Menu do Caçador). Se o jogo mudar, é por aí que algo quebra.
 
 ## Histórico
+
+- **1.10.0** – Build padrão por classe (Destruidor, Lâmina Letal, Rajada Arcana, Chuva de Flechas, Julgador)
+  quando o painel fica em "Build padrão da classe". Rajada Arcana e Cruzado aprendem Estilhaçar / Luz Punitiva
+  antes da Fundação (sem eles a STR não dá dano). Caçada sozinho: mede o EXP/h do HUD do Auto-Helper na
+  Recomendada e na área logo abaixo (15 min cada) e fica na que render 10% a mais; mede de novo quando a
+  Recomendada muda ou a cada 4 h (na trava de morte, não mede). Party: só o líder (coroa) escolhe a área e
+  faz a comparação de EXP/h; quem não é líder só clica em **Ir para a caçada do grupo** quando fica fora dela
+  (morte, Loja do Brok) e não desce de área sozinho. O painel AUTO cabe na tela (rola por dentro) mesmo nas
+  janelas pequenas da grade do IdleDeck.
 
 - **1.9.0** – Loja do Brok: vai até ele na cidade e completa poções grandes, mana grande e Revivers, com reserva de ouro
 - **1.8.0** – Trava de morte: conta as mortes e, com 2 em 15 min, caça uma área abaixo por 60 min

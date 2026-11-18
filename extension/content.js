@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.8.0
+// @version      1.10.0
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -43,10 +43,14 @@
 
   const DEBUG = false; // true: log detalhado da troca de área
 
+  // Build usada quando o painel fica em "Build padrão da classe" (uma por classe; os nomes não se repetem).
+  const PREFERRED_BUILDS = ['Destruidor', 'Lâmina Letal', 'Rajada Arcana', 'Chuva de Flechas', 'Julgador'];
+  const isPreferred = (name) => PREFERRED_BUILDS.some((p) => norm(p) === norm(name));
+
   const DEFAULTS = {
     enabled: false,
     autoPoints: true,
-    buildName: '',          // '' = primeira build da lista da classe
+    buildName: '',          // '' = build padrão da classe (PREFERRED_BUILDS) ou a primeira da lista
     minPoints: 5,           // só distribui com pelo menos N pontos livres
     autoEquip: true,
     criterion: 1,
@@ -56,6 +60,8 @@
     teamEveryMin: 30,
     autoHunt: true,         // vai para a área "Recomendada" pelo jogo nas Caçadas
     huntEveryMin: 20,
+    expCompare: true,       // sozinho: mede o EXP/h da recomendada e da área logo abaixo e fica na melhor
+    expSampleMin: 15,       // minutos caçando em cada área antes de medir
     autoTalents: true,      // investe os pontos de talento pelo plano da build
     talentBuild: '',        // '' = mesmo nome da build de atributos (ou a 1ª da classe)
     talentsEveryMin: 20,
@@ -78,6 +84,7 @@
     lastShop: 0,
     deaths: [],
     huntPauseUntil: 0,
+    expTest: null,          // medição em andamento: {rec, low, recXph, lowXph, win, at, enteredAt}
     talentPlanSeen: '',
     knownBuilds: [],
     log: [],
@@ -317,7 +324,8 @@
     if (free < Math.max(1, cfg.minPoints)) { await closePanels(); return; }
     if (!builds.length) { log('Nenhuma build encontrada no Status.'); await closePanels(); return; }
 
-    const chosen = builds.find((b) => norm(b.name) === norm(cfg.buildName)) || builds[0];
+    const chosen = builds.find((b) => norm(b.name) === norm(cfg.buildName))
+      || builds.find((b) => isPreferred(b.name)) || builds[0];
     const before = new Set(buttons().filter((b) => norm(b.innerText) === 'distribuir pela build'));
     click(chosen.button);
 
@@ -686,7 +694,7 @@
     const list = PLANS && PLANS[cls];
     if (!list || !list.length) return null;
     const want = cfg.talentBuild || cfg.buildName;
-    return list.find((p) => norm(p.build) === norm(want)) || list[0];
+    return list.find((p) => norm(p.build) === norm(want)) || list.find((p) => isPreferred(p.build)) || list[0];
   }
 
   async function doTalents() {
@@ -748,6 +756,14 @@
     const party = partyLevels();
     const own0 = ownLevel();
 
+    // Em party só o líder escolhe a área (os outros vão junto). Quem não é líder só volta para
+    // a caçada do grupo: o jogo mostra "Ir para a caçada do grupo" quando você está fora dela.
+    if (party.length && partyLeaderIsOther()) {
+      const go = [...document.querySelectorAll('button.slPdmGo')].find(visible);
+      if (go) { await clickConfirm(go); log('Party: voltei para a caçada do grupo.'); }
+      return;
+    }
+
     // Abre as Caçadas na aba "Caçadas" e espera a trilha (ou o "Recomendada") aparecer.
     const openList = async () => {
       if (!(await openHunts())) return false;
@@ -763,14 +779,32 @@
     // Trava de morte ativa: usa a trilha com o limite 5 níveis abaixo (uma área a menos).
     const guardOn = cfg.deathGuard && Date.now() < (cfg.huntPauseUntil || 0);
 
+    // Escolhe uma área da trilha, reabrindo a lista se a ficha de outra área tomou o lugar dela.
+    const selectNode = async (w) => {
+      await showTrail();
+      let n = huntAreaNodes().find((x) => x.start === w.start && x.end === w.end);
+      if (!n) {
+        await closePanels();
+        if (!(await openList())) return null;
+        n = huntAreaNodes().find((x) => x.start === w.start && x.end === w.end);
+        if (!n) return null;
+      }
+      click(n.el);
+      await sleep(800);
+      return selectedAreaState();
+    };
+
     if (!party.length && !guardOn) {
-      // Sozinho: segue a "Recomendada" do jogo.
+      // Sozinho: segue a "Recomendada" do jogo (ou a área logo abaixo, se ela render mais EXP/h).
+      const nodes = huntAreaNodes(); // lê antes de clicar: na grade a ficha toma o lugar da trilha
       const rec = huntRecBtn();
       if (!rec) { log('Botão "Recomendada" não apareceu.'); await closePanels(); return; }
       click(rec);
       await sleep(900);
       const st = selectedAreaState();
       if (DEBUG) log(`[caçada] sem party; recomendada: ${st}`);
+      const R = nodes.find((n) => n.rec) || (st === 'current' ? nodes.find((n) => n.state === 'live') : null); // ★ só aparece fora da atual
+      if (cfg.expCompare && R && (await compareLower(nodes, R, selectNode))) return;
       if (st === 'enter') { await enterSelectedArea('recomendada'); return; }
       if (st === 'precision') log('Área recomendada pede mais Precisão; fiquei na atual.');
       await closePanels();
@@ -789,21 +823,12 @@
     const wanted = nodes.filter((n) => n.start <= cap && n.state !== 'locked').sort((a, b) => b.start - a.start);
     if (DEBUG) log(`[caçada] party ${party.join(',')}; eu ${own}; limite ${cap}; atual ${live ? `${live.start}-${live.end}` : '?'}; opções ${wanted.map((n) => `${n.start}-${n.end}`).join(' ') || 'nenhuma'}`);
     if (!nodes.length) { log('Não achei a trilha de áreas nas Caçadas.'); await closePanels(); return; }
+    // Líder: compara a melhor área da party com a logo abaixo (o EXP/h do líder sobe e desce junto com o do grupo).
+    if (cfg.expCompare && !guardOn && wanted[0] && (await compareLower(nodes, wanted[0], selectNode))) return;
 
     for (const w of wanted) {
       if (w.state === 'live') { await closePanels(); return; } // a melhor área possível já é a atual
-      // Reabre a lista se a ficha de outra área tomou o lugar da trilha.
-      await showTrail();
-      let n = huntAreaNodes().find((x) => x.start === w.start && x.end === w.end);
-      if (!n) {
-        await closePanels();
-        if (!(await openList())) break;
-        n = huntAreaNodes().find((x) => x.start === w.start && x.end === w.end);
-        if (!n) continue;
-      }
-      click(n.el);
-      await sleep(800);
-      const st = selectedAreaState();
+      const st = await selectNode(w);
       if (DEBUG) log(`[caçada] ${w.start}-${w.end}: ${st}`);
       if (st === 'current') { await closePanels(); return; }
       if (st === 'enter') {
@@ -812,11 +837,88 @@
           : `menor nível da party: ${cap}`);
         return;
       }
-      // 'locked' ou 'precision': tenta a próxima área abaixo.
+      // null, 'locked' ou 'precision': tenta a próxima área abaixo.
     }
     log(`Nenhuma área até o Nv ${cap}${guardOn ? ' (trava de morte)' : ' (menor da party)'} está aberta para mim.`);
     await closePanels();
   }
+
+  // EXP/h: mede a área R (a Recomendada ou, em party, a melhor que abre para todos) e a logo
+  // abaixo (expSampleMin cada, uma rodada por vez) e fica na que render mais. Mede de novo
+  // quando R muda ou a cada 4 h. Devolve true quando já resolveu a rodada; false = fluxo normal.
+  const EXP_RETEST_MS = 4 * 3600000;
+  const EXP_MARGIN = 0.1; // a de baixo precisa render 10% a mais: o HUD arredonda o EXP/h
+  async function compareLower(nodes, R, selectNode) {
+    const key = (n) => `${n.start}-${n.end}`;
+    const live = nodes.find((n) => n.state === 'live');
+    const L = nodes.filter((n) => n.start < R.start && n.state !== 'locked').sort((a, b) => b.start - a.start)[0];
+    if (!L) return false;
+    let t = cfg.expTest;
+    if (!t || t.rec !== key(R) || t.low !== key(L) || Date.now() - t.at > EXP_RETEST_MS) {
+      t = cfg.expTest = { rec: key(R), low: key(L), at: Date.now(), enteredAt: 0 };
+    }
+    const here = live && key(live);
+    const r = huntRate();
+    if (!t.win && here && !r && !t.noRate) { t.noRate = true; log('EXP/h: não achei o EXP/h do Auto-Helper no HUD; fico na área de cima.'); }
+    if (!t.win && r && r.secs >= cfg.expSampleMin * 60) {
+      // O relógio tem que ter começado depois da nossa última troca de área.
+      if (t.enteredAt && r.secs > (Date.now() - t.enteredAt) / 1000 + 120) {
+        t.win = t.rec;
+        log('EXP/h: o relógio do Auto-Helper não zerou ao trocar de área; fico na área de cima.');
+      } else if (here === t.rec && t.recXph == null) t.recXph = r.xph;
+      else if (here === t.low && t.lowXph == null) t.lowXph = r.xph;
+      if (t.recXph != null && t.lowXph != null) {
+        t.win = t.lowXph > t.recXph * (1 + EXP_MARGIN) ? t.low : t.rec;
+        log(`EXP/h: ${t.rec} = ${fmtCompact(t.recXph)}, ${t.low} = ${fmtCompact(t.lowXph)}. Fico na ${t.win}.`);
+      }
+    }
+    saveCfg();
+    const goal = t.win || (t.recXph == null || !r ? t.rec : t.low);
+    if (here === goal) { await closePanels(); return true; }
+    const toR = goal === t.rec;
+    if ((await selectNode(toR ? R : L)) !== 'enter') {
+      if (toR) return false; // R pede Precisão ou está selada: segue o fluxo normal
+      t.win = t.rec; saveCfg(); // a de baixo não abre para mim: volta para R já
+      await closePanels(); lastHunt = 0;
+      return true;
+    }
+    t.enteredAt = Date.now(); saveCfg();
+    await enterSelectedArea(`${toR ? 'área melhor' : 'área de baixo'}, ${t.win ? 'mais EXP/h' : 'medindo EXP/h'}`);
+    return true;
+  }
+
+  // EXP/h e tempo da caçada atual no HUD do Auto-Helper (navegador: .slHudAh; app desktop:
+  // .slStripAuto). O jogo mostra o número compacto ("345,2 mil", "1,2 mi") e o relógio hh:mm:ss.
+  function huntRate() {
+    const strip = document.querySelector('section.slStripAuto');
+    const rows = strip ? [...strip.querySelectorAll('.slStripAutoStats > div')] : [];
+    const row = rows.find((d) => /^(exp|xp) ?\/ ?h/.test(norm(d.querySelector('dt')?.textContent))) || rows[3]; // ordem fixa: ouro, ouro/h, EXP, EXP/h
+    const pairs = [
+      [document.querySelector('.slHudAhRateVal'), document.querySelector('.slHudAhTime')],
+      [row && row.querySelector('dd'), strip && strip.querySelector('.slStripAutoClock')],
+    ];
+    for (const [v, c] of pairs) {
+      const xph = v ? parseCompact(v.textContent) : null;
+      const secs = c ? parseClock(c.textContent) : null;
+      if (xph != null && secs != null) return { xph, secs };
+    }
+    return null;
+  }
+  function parseCompact(text) {
+    const m = norm(text).replace(/\s/g, '').match(/^([\d.,]+)(mil|mi|bi|tri|k|m|b|t)?$/);
+    if (!m) return null;
+    const n = m[2] ? m[1].replace(',', '.') : m[1].replace(/[.,]/g, ''); // com sufixo, o separador é decimal
+    const mult = { mil: 1e3, k: 1e3, mi: 1e6, m: 1e6, bi: 1e9, b: 1e9, tri: 1e12, t: 1e12 }[m[2]] || 1;
+    return Number.isFinite(Number(n)) ? Math.round(Number(n) * mult) : null;
+  }
+  function parseClock(text) {
+    const m = String(text || '').trim().match(/^(\d+):(\d\d):(\d\d)$/);
+    return m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) : null;
+  }
+  const fmtCompact = (n) => new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
+  console.assert(parseCompact('345,2 mil') === 345200 && parseCompact('1,2 mi') === 1200000 && parseCompact('1.5M') === 1500000
+    && parseCompact('950') === 950 && parseCompact('—') === null && parseClock('01:02:03') === 3723 && parseClock('--:--:--') === null,
+  '[leveling-idle-auto] leitor do EXP/h quebrou');
 
   // Na grade, ao escolher uma área a ficha dela toma o lugar da trilha (e o painel
   // reabre nela). O ✕ da ficha (button.slAtlasClose, "Voltar") traz a trilha de volta.
@@ -827,6 +929,9 @@
     click(back);
     return !!(await waitFor(() => huntAreaNodes().length, 2500));
   }
+
+  // Os quadros da party são dos outros membros; a coroa (.slPartyCrown) marca o líder.
+  const partyLeaderIsOther = () => [...document.querySelectorAll('.slPartyFrame')].some((f) => visible(f) && f.querySelector('.slPartyCrown'));
 
   // Níveis dos outros membros da party (HUD: um .slPartyFrame por membro, com "Nv N").
   function partyLevels() {
@@ -855,7 +960,7 @@
         const lv = b.querySelector('.slAtlasNodeLv');
         const t = `${lv ? lv.textContent : ''} ${b.getAttribute('aria-label') || ''}`;
         const m = t.match(/(\d+)\s*[^\d\s]{1,3}\s*(\d+)/);
-        return m ? { el: b, start: Number(m[1]), end: Number(m[2]), state: b.dataset.state || '' } : null;
+        return m ? { el: b, start: Number(m[1]), end: Number(m[2]), state: b.dataset.state || '', rec: !!b.querySelector('.slAtlasStar') } : null;
       })
       .filter(Boolean);
   }
@@ -877,6 +982,21 @@
     return sealed ? 'locked' : 'current';
   }
 
+  // Clica e, se o jogo pedir confirmação (party, etc.), confirma só no diálogo novo.
+  async function clickConfirm(btn) {
+    const before = new Set(buttons());
+    click(btn);
+    await sleep(1200);
+    const confirm = buttons().find((b) => !before.has(b) && CONFIRM_WORDS.test(norm(b.innerText)));
+    if (confirm) {
+      const box = confirm.closest('[role="dialog"], [class*="Modal"], [class*="Confirm"], [class*="Dialog"]');
+      const msg = norm(box ? box.innerText : '').slice(0, 140);
+      click(confirm);
+      log(`Confirmei troca de área${msg ? ` ("${msg}")` : ''}.`);
+      await sleep(1200);
+    }
+  }
+
   async function enterSelectedArea(why) {
     const enter = findButton((t) => t === 'entrar no portal');
     // Nome da área: o título logo acima da linha "Portal Azul · Nv 21-25" do detalhe.
@@ -889,19 +1009,7 @@
       return name && name.length < 40 ? `${name} (${where})` : (where || 'área nova');
     })();
 
-    const before = new Set(buttons());
-    click(enter);
-    await sleep(1200);
-
-    // Se o jogo pedir confirmação (party, etc.), confirma só no diálogo novo.
-    const confirm = buttons().find((b) => !before.has(b) && CONFIRM_WORDS.test(norm(b.innerText)));
-    if (confirm) {
-      const box = confirm.closest('[role="dialog"], [class*="Modal"], [class*="Confirm"], [class*="Dialog"]');
-      const msg = norm(box ? box.innerText : '').slice(0, 140);
-      click(confirm);
-      log(`Confirmei troca de área${msg ? ` ("${msg}")` : ''}.`);
-      await sleep(1200);
-    }
+    await clickConfirm(enter);
     log(`Fui para ${title} (${why}).`);
     await sleep(800);
     await closePanels();
@@ -1136,7 +1244,8 @@
       cfg.deaths.push(now);
       saveCfg();
       log(`Morri (${cfg.deaths.length} em ${cfg.deathWindowMin} min).`);
-      if (cfg.enabled && cfg.deathGuard && cfg.deaths.length >= Math.max(1, cfg.deathLimit)) {
+      // Quem não é líder da party não desce sozinho (sairia da caçada do grupo).
+      if (cfg.enabled && cfg.deathGuard && !partyLeaderIsOther() && cfg.deaths.length >= Math.max(1, cfg.deathLimit)) {
         cfg.huntPauseUntil = now + Math.max(5, cfg.deathPauseMin) * 60000;
         cfg.deaths = [];
         saveCfg();
@@ -1192,7 +1301,7 @@
     for (const n of opts) {
       const o = document.createElement('option');
       o.value = n;
-      o.textContent = n || 'Primeira build da classe';
+      o.textContent = n || 'Build padrão da classe';
       if (norm(n) === norm(cfg.buildName)) o.selected = true;
       $buildSel.appendChild(o);
     }
@@ -1206,7 +1315,7 @@
         #lvlAutoRoot{position:fixed;left:12px;bottom:12px;z-index:2147483647;font:12px/1.4 system-ui,sans-serif;color:#eee}
         #lvlAutoRoot .fab{background:#7c4dff;color:#fff;border:0;border-radius:6px;padding:6px 10px;font-weight:700;cursor:pointer;box-shadow:0 2px 8px #0008}
         #lvlAutoRoot .fab.on{background:#2ecc71;color:#06210f}
-        #lvlAutoRoot .box{display:none;margin-bottom:6px;width:280px;background:#15121f;border:1px solid #4b3a8a;border-radius:8px;padding:10px;box-shadow:0 4px 16px #000a}
+        #lvlAutoRoot .box{display:none;margin-bottom:6px;width:280px;max-width:calc(100vw - 24px);max-height:calc(100vh - 64px);overflow-y:auto;box-sizing:border-box;background:#15121f;border:1px solid #4b3a8a;border-radius:8px;padding:10px;box-shadow:0 4px 16px #000a}
         #lvlAutoRoot.open .box{display:block}
         #lvlAutoRoot label{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0}
         #lvlAutoRoot select,#lvlAutoRoot input[type=number]{background:#221c33;color:#eee;border:1px solid #4b3a8a;border-radius:4px;padding:2px 4px;max-width:150px}
@@ -1246,6 +1355,8 @@
         <h4>Caçada</h4>
         <label>Ir para a área recomendada<input type="checkbox" data-k="autoHunt"></label>
         <label>Checar a cada (min)<input type="number" min="5" max="240" data-k="huntEveryMin"></label>
+        <label>Comparar EXP/h com a área de baixo<input type="checkbox" data-k="expCompare"></label>
+        <label>Medir cada área por (min)<input type="number" min="5" max="120" data-k="expSampleMin"></label>
         <label>Descer de área após mortes<input type="checkbox" data-k="deathGuard"></label>
         <label>Mortes em 15 min para descer<input type="number" min="1" max="10" data-k="deathLimit"></label>
         <label>Ficar na área de baixo (min)<input type="number" min="5" max="480" data-k="deathPauseMin"></label>

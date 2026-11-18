@@ -101,8 +101,8 @@ def plano(classe, ramo1, esc1, ramo2, esc2, apice):
     ini, raiz = c['core']
     r1, r2 = c['ramos'][ramo1], c['ramos'][ramo2]
     p = [(ini, 1), (raiz, req_level(r1[0], raiz))]
-    p += FUND_1
-    p += ramo(r1, esc1)
+    # Builds de STR em classe de INT: sem Estilhaçar / Luz Punitiva a STR não dá dano, então o ramo vem antes.
+    p += ramo(r1, esc1) + FUND_1 if esc1 in ('m_c_estilhacar', 's_luzpunitiva') else FUND_1 + ramo(r1, esc1)
     p += [(raiz, nos[raiz]['maxNivel'])]
     p += AMB_1
     p += ramo(r2, esc2)

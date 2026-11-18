@@ -1,4 +1,4 @@
-# Leveling Idle – Auto Pontos, Talentos, Equipar, Exército e Caçada
+# Leveling Idle – Auto Pontos, Talentos, Equipar, Exército, Caçada e Recompensas
 
 Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que automatiza tarefas repetitivas do [Leveling Idle 2D](https://levelingidle2d.com.br/jogar), clicando só nos botões que o próprio jogo já tem:
 
@@ -9,6 +9,10 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 | Equipamento | Inventário → **Equipar melhores** (critério escolhido) | A cada 10 min |
 | Exército | Exército → **Montar melhor time** | A cada 30 min |
 | Área de caça | Caçadas → **Entrar no portal** da melhor área permitida (sozinho: a **★ Recomendada**; em party: veja abaixo) | A cada 20 min e ao subir de nível |
+| Expedições | Exército → Expedições → **Coletar tudo** e manda Sombras **só do Armazém** (nunca do time) no destino mais alto que cada uma aguenta | A cada 20 min |
+| Missões | Missões → **Resgatar** (Jornada do Caçador e objetivos diários prontos) | A cada 15 min |
+| Recompensa Diária | Recompensas Diárias → **Resgatar** | A cada 15 min |
+| Correio | Correio → **Reivindicar tudo** (e de novo ~1 min depois de resgatar a Diária) | A cada 15 min |
 
 > **Em party** a área precisa servir para todo mundo: o limite é o **menor nível** entre você e
 > os membros (lido no quadro da party). A extensão escolhe a maior área da trilha que começa até
@@ -98,6 +102,9 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
 
 ## Histórico
 
+- **1.6.2** – Recompensas: resgata Missões, Recompensa Diária e Correio; coleta e envia
+  Expedições de Sombras (só do Armazém, tenta destinos e dificuldades mais fáceis quando a
+  Sombra é fraca). Expedições rodam antes das Missões para o objetivo "Envie 1 expedição".
 - **1.5.0** – Talentos: investe os pontos de talento sozinho seguindo o plano da build (15 planos,
   5 classes), sem nunca redefinir a árvore.
 - **1.4.0** – Caçadas em party: respeita o menor nível da party. Lê a trilha pelos botões de área

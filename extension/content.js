@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.5.0
+// @version      1.6.2
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -59,6 +59,10 @@
     autoTalents: true,      // investe os pontos de talento pelo plano da build
     talentBuild: '',        // '' = mesmo nome da build de atributos (ou a 1ª da classe)
     talentsEveryMin: 20,
+    autoRewards: true,      // resgata Missões, Diária e Correio
+    rewardsEveryMin: 15,
+    autoExped: true,        // coleta e manda Sombras do Armazém em expedição
+    expedEveryMin: 20,
     talentPlanSeen: '',
     knownBuilds: [],
     log: [],
@@ -187,10 +191,12 @@
     const b = document.querySelector('.slShBestBtn');
     return visible(b) ? b : null;
   };
-  const armyOpen = () => armyBestBtn() || [...document.querySelectorAll('.slShTeamGrid')].find(visible) || null;
+  const armyOpen = () => armyBestBtn() || [...document.querySelectorAll('.slShTeamGrid, .slShExPill')].find(visible) || null;
 
   // Itens dos menus do jogo (button.slGmItem com rótulo .slGmItemLabel).
+  // labelRe pode ser o id do painel (data-id do item, ex.: 'mail') ou um regex do rótulo.
   const menuItem = (labelRe, needVisible) => [...document.querySelectorAll('button.slGmItem')].find((b) => {
+    if (typeof labelRe === 'string') return b.dataset.id === labelRe && (!needVisible || visible(b));
     const lbl = b.querySelector('.slGmItemLabel') || b;
     return labelRe.test(norm(lbl.innerText || lbl.textContent)) && (!needVisible || visible(b));
   }) || null;
@@ -234,7 +240,7 @@
 
   async function closePanels() {
     for (let i = 0; i < 3; i++) {
-      if (!statusOpen() && !invOpen() && !armyOpen() && !huntsOpen() && !talOpen()) break;
+      if (!statusOpen() && !invOpen() && !armyOpen() && !huntsOpen() && !talOpen() && !rewardsPanelOpen()) break;
       pressKey('Escape', 'Escape');
       await sleep(350);
     }
@@ -365,6 +371,157 @@
     click(best);
     log('Montei o melhor time do Exército.');
     await sleep(1200);
+    await closePanels();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 3a) Recompensas: Missões, Recompensa Diária, Correio e Expedições de Sombras
+  // ---------------------------------------------------------------------------
+  const visQ = (sel) => [...document.querySelectorAll(sel)].find(visible) || null;
+  const msnOpen = () => visQ('.slMsnDaily, .slMsnJourney, .slMsnCards');
+  const dailyOpen = () => visQ('.drwToday');
+  const mailOpen = () => visQ('.slMailClaimAll, .slMailSummary');
+  const rewardsPanelOpen = () => msnOpen() || dailyOpen() || mailOpen();
+  const openMissions = () => openFromGameMenu('missions', /(^|\s)cacador$/, msnOpen, ['j', 'KeyJ']);
+  const openMail = () => openFromGameMenu('mail', /(^|\s)social$/, mailOpen, null);
+  async function openDaily() {
+    if (dailyOpen()) return true;
+    const chatBtn = visQ('button.slChatDaily'); // botão "DIÁRIA" do chat
+    if (chatBtn) { click(chatBtn); if (await waitFor(dailyOpen, 3000)) return true; }
+    return openFromGameMenu('daily', /(^|\s)aventura$/, dailyOpen, null);
+  }
+
+  async function doMissions() {
+    if (!(await openMissions())) { log('Não consegui abrir as Missões.'); await closePanels(); return; }
+    await sleep(600);
+    let n = 0;
+    // A Jornada passa para o próximo passo depois de cada resgate: repete enquanto houver.
+    for (let i = 0; i < 12; i++) {
+      const b = buttons(document).find((x) => !x.disabled && x.closest('.slMsnActions, .slMsnCard')
+        && /^resgatar\b/.test(norm(x.innerText)));
+      if (!b) break;
+      click(b); n++;
+      await sleep(jitter(1100));
+    }
+    if (n) log(`Missões: resgatei ${n} recompensa(s).`);
+    await closePanels();
+  }
+
+  async function doDaily() {
+    if (!(await openDaily())) { await closePanels(); return; } // diária pode não existir (nível baixo / pausada)
+    await sleep(500);
+    const b = visQ('button.drwClaim');
+    if (b && !b.disabled) {
+      click(b);
+      log('Recompensa Diária resgatada (vai para o Correio).');
+      await sleep(1500);
+      mailSoon = Date.now() + 45000; // a correspondência chega em seguida: volta ao Correio em ~1 min
+    }
+    await closePanels();
+  }
+
+  async function doMail() {
+    if (!(await openMail())) { log('Não consegui abrir o Correio.'); await closePanels(); return; }
+    // O botão fica desligado enquanto a lista carrega: espera ele ligar (ou desiste em 6 s = nada a reivindicar).
+    const b = await waitFor(() => {
+      const x = visQ('button.slMailClaimAll');
+      return x && !x.disabled && !/reivindicando/.test(norm(x.innerText)) ? x : null;
+    }, 6000);
+    await sleep(500);
+    if (b && !b.disabled) {
+      click(b);
+      await waitFor(() => visQ('.slMailResult'), 5000);
+      const r = visQ('.slMailResult');
+      log('Correio: reivindiquei tudo.' + (r && r.classList.contains('slMailResultWarn') ? ' (mochila cheia: parte ficou lá)' : ''));
+      await sleep(800);
+    }
+    await closePanels();
+  }
+
+  // Expedições: aba "Expedições" do Exército. Coleta as que voltaram e manda Sombras
+  // do ARMAZÉM (nunca as do time) para as vagas livres, no destino mais alto que a
+  // Sombra aguenta (o jogo desliga o "Enviar Sombra" quando ela é fraca demais).
+  async function closeExpReport() {
+    const modal = await waitFor(() => visQ('.slShExReportModal'), 2500);
+    if (!modal) return;
+    const box = modal.closest('[role="dialog"], .slModal') || modal.parentElement || modal;
+    const close = buttons(box).find((x) => /^(fechar|ok|entendi|continuar)\b/.test(norm(x.innerText)));
+    if (close) click(close); else pressKey('Escape', 'Escape');
+    await sleep(500);
+  }
+
+  function expSlots() {
+    const pill = [...document.querySelectorAll('.slShExPill')].filter(visible)
+      .map((p) => norm(p.innerText).match(/em expedicao\s*(\d+)\s*\/\s*(\d+)/)).find(Boolean);
+    return pill ? { away: Number(pill[1]), total: Number(pill[2]) } : null;
+  }
+  const expSend = () => visQ('button.slShExSend');
+
+  async function doExpeditions() {
+    if (!(await openArmy())) { log('Não consegui abrir o Exército.'); await closePanels(); return; }
+    await sleep(400);
+    if (!expSlots()) {
+      const tab = findButton((t) => /^expedicoes\b/.test(t));
+      if (!tab) { await closePanels(); return; } // nível baixo ou expedição desligada
+      click(tab);
+      await waitFor(expSlots, 3000);
+    }
+    if (!expSlots()) { await closePanels(); return; }
+    await sleep(500);
+
+    const collect = findButton((t) => /^coletar tudo\b/.test(t));
+    if (collect) {
+      click(collect);
+      log('Expedições: coletei as que voltaram.');
+      await closeExpReport();
+      await sleep(600);
+    }
+
+    // Filtro "Armazém" para nunca mandar Sombra do time.
+    const storTab = findButton((t) => /^armazem\b/.test(t));
+    if (storTab) { click(storTab); await sleep(500); }
+
+    let sent = 0;
+    const tried = new Set();
+    for (let guard = 0; guard < 8; guard++) {
+      const s = expSlots();
+      if (!s || s.away >= s.total) break;
+      const cand = [...document.querySelectorAll('.slShExCand')].filter(visible)
+        .find((c) => !tried.has(c.dataset.uid) && /armazem/.test(norm(c.innerText)));
+      if (!cand) break;
+      tried.add(cand.dataset.uid);
+      click(cand);
+      await sleep(900);
+      let send = expSend();
+      const ok = () => { send = expSend(); return send && !send.disabled; };
+      // Tenta as dificuldades do destino atual (da mais difícil para a mais fácil);
+      // se nenhuma servir, tenta os outros destinos abertos, do mais alto para o mais baixo.
+      async function tryDifs() {
+        const difs = [...document.querySelectorAll('.slShExDifs button.slShExSeg')].filter((b) => visible(b) && !b.disabled);
+        for (const d of difs.reverse()) {
+          click(d);
+          await sleep(900);
+          if (ok()) return true;
+        }
+        return false;
+      }
+      if (!ok() && !(await tryDifs())) {
+        const gates = [...document.querySelectorAll('.slShExGates button')].filter((b) => visible(b) && !b.disabled);
+        for (const g of gates.reverse()) {
+          click(g);
+          await sleep(900);
+          if (ok() || (await tryDifs())) break;
+        }
+      }
+      if (!send || send.disabled) continue; // fraca demais para qualquer destino aberto
+      click(send);
+      sent++;
+      await sleep(jitter(1400));
+    }
+    if (sent) log(`Expedições: mandei ${sent} Sombra(s) do Armazém.`);
+    // Volta o Exército para a aba "Time" (o "Montar melhor time" depende dela).
+    const teamTab = findButton((t) => /^time\b/.test(t));
+    if (teamTab) { click(teamTab); await sleep(300); }
     await closePanels();
   }
 
@@ -656,6 +813,10 @@
   let lastTeam = 0;
   let lastHunt = 0;
   let lastTalents = 0;
+  let lastRewards = 0;
+  let lastMail = 0;
+  let lastExped = 0;
+  let mailSoon = 0;
 
   function readLevel() {
     const card = document.querySelector('.slHudCard');
@@ -702,6 +863,21 @@
       if (cfg.autoTeam && (force || now - lastTeam > cfg.teamEveryMin * 60000)) {
         lastTeam = now;
         await doTeam();
+      }
+      // Expedições antes das Missões: enviar uma conta para o objetivo diário "Envie 1 expedição".
+      if (cfg.autoExped && (force || now - lastExped > cfg.expedEveryMin * 60000)) {
+        lastExped = now;
+        await doExpeditions();
+      }
+      if (cfg.autoRewards && (force || now - lastRewards > cfg.rewardsEveryMin * 60000)) {
+        lastRewards = now;
+        await doMissions();
+        await doDaily();
+      }
+      if (cfg.autoRewards && (force || (mailSoon && now > mailSoon) || now - lastMail > cfg.rewardsEveryMin * 60000)) {
+        lastMail = now;
+        mailSoon = 0;
+        await doMail();
       }
       if (cfg.autoHunt && (force || levelUp || now - lastHunt > cfg.huntEveryMin * 60000)) {
         lastHunt = now;
@@ -797,6 +973,11 @@
         <h4>Exército</h4>
         <label>Montar melhor time sozinho<input type="checkbox" data-k="autoTeam"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="teamEveryMin"></label>
+        <h4>Recompensas</h4>
+        <label>Resgatar Missões, Diária e Correio<input type="checkbox" data-k="autoRewards"></label>
+        <label>A cada (min)<input type="number" min="5" max="240" data-k="rewardsEveryMin"></label>
+        <label>Expedições (só Armazém)<input type="checkbox" data-k="autoExped"></label>
+        <label>A cada (min)<input type="number" min="5" max="240" data-k="expedEveryMin"></label>
         <h4>Caçada</h4>
         <label>Ir para a área recomendada<input type="checkbox" data-k="autoHunt"></label>
         <label>Checar a cada (min)<input type="number" min="5" max="240" data-k="huntEveryMin"></label>
@@ -825,7 +1006,7 @@
         saveCfg();
         paintFab();
         setStatus(cfg.enabled ? 'ligado' : 'desligado');
-        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; lastTalents = 0; tick(false); }
+        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; lastTalents = 0; lastRewards = 0; lastMail = 0; lastExped = 0; tick(false); }
       });
       // não deixar as teclas do painel virarem atalho do jogo
       el.addEventListener('keydown', (e) => e.stopPropagation());

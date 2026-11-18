@@ -1,4 +1,4 @@
-# Leveling Idle – Auto Pontos, Talentos, Equipar, Exército, Caçada e Recompensas
+# Leveling Idle – Auto Pontos, Talentos, Equipar, Encantar, Exército, Caçada e Recompensas
 
 Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que automatiza tarefas repetitivas do [Leveling Idle 2D](https://levelingidle2d.com.br/jogar), clicando só nos botões que o próprio jogo já tem:
 
@@ -7,6 +7,7 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 | Pontos de atributo | Status → **Distribuir pela build** (build escolhida) | Quando aparece o **+N** de pontos livres, e a cada 15 min |
 | Talentos | Árvore de Talentos → aprende 1 nível por vez (duplo clique) seguindo o plano da build | A cada 20 min, quando há pontos |
 | Equipamento | Inventário → **Equipar melhores** (critério escolhido) | A cada 10 min |
+| Encantar | Forja → Encantamento, filtro **Só vestidas** + **Só as que ainda sobem** → **Encantar para +N**, só quando a tentativa é **Garantido** (100%, até +5). Para quando acaba a pedra ou o ouro | A cada 30 min |
 | Exército | Exército → **Montar melhor time** | A cada 30 min |
 | Área de caça | Caçadas → **Entrar no portal** da melhor área permitida (sozinho: a **★ Recomendada**; em party: veja abaixo) | A cada 20 min e ao subir de nível |
 | Expedições | Exército → Expedições → **Coletar tudo** e manda Sombras **só do Armazém** (nunca do time) no destino mais alto que cada uma aguenta | A cada 20 min |
@@ -101,6 +102,10 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
   Menu do Caçador). Se o jogo mudar, é por aí que algo quebra.
 
 ## Histórico
+
+- **1.7.1** – Encantar: encanta sozinho as peças vestidas na Forja, só enquanto o jogo marca a
+  tentativa como "Garantido" (até +5, sem risco). Acima disso a falha gasta a pedra, então fica
+  manual. Roda antes das Missões, para "Encante um item até +1" sair resgatado na mesma rodada.
 
 - **1.6.2** – Recompensas: resgata Missões, Recompensa Diária e Correio; coleta e envia
   Expedições de Sombras (só do Armazém, tenta destinos e dificuldades mais fáceis quando a

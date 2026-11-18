@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.6.2
+// @version      1.7.1
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -63,6 +63,8 @@
     rewardsEveryMin: 15,
     autoExped: true,        // coleta e manda Sombras do Armazém em expedição
     expedEveryMin: 20,
+    autoEnchant: true,      // encanta as peças vestidas só enquanto for "Garantido" (até +5)
+    enchantEveryMin: 30,
     talentPlanSeen: '',
     knownBuilds: [],
     log: [],
@@ -240,7 +242,7 @@
 
   async function closePanels() {
     for (let i = 0; i < 3; i++) {
-      if (!statusOpen() && !invOpen() && !armyOpen() && !huntsOpen() && !talOpen() && !rewardsPanelOpen()) break;
+      if (!statusOpen() && !invOpen() && !armyOpen() && !huntsOpen() && !talOpen() && !rewardsPanelOpen() && !forgeOpen()) break;
       pressKey('Escape', 'Escape');
       await sleep(350);
     }
@@ -351,6 +353,85 @@
     await sleep(800);
     pressKey('Escape', 'Escape'); // fecha o diálogo, se ainda estiver aberto
     await sleep(300);
+    await closePanels();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2a) Forja: encanta só as peças VESTIDAS e só quando a tentativa é "Garantido"
+  //     (100%, até +5). Acima disso a falha gasta a pedra: isso fica com o jogador.
+  // ---------------------------------------------------------------------------
+  const forgeOpen = () => visQ('.slForgeTabs');
+  const openForge = () => openFromGameMenu(/^forja\b/, /(^|\s)cacador$/, forgeOpen, null);
+  const forgeList = () => document.querySelector('.slForgeList');
+  const forgeIdle = () => { const l = forgeList(); return l && l.getAttribute('aria-busy') !== 'true' ? l : null; };
+  const forgeItems = () => [...(forgeList() ? forgeList().querySelectorAll('.slForgeTile, .slForgeRow') : [])].filter(visible);
+  const forgeKey = (b) => b.getAttribute('aria-label') || b.title || norm(b.innerText);
+
+  // Filtros da lista: "Mostrar: Só vestidas" (select nativo) + chip "Só as que ainda sobem".
+  function setForgeFilters() {
+    let changed = false;
+    for (const sel of document.querySelectorAll('.slForgeFilterPanel select')) {
+      const opt = [...sel.options].find((o) => norm(o.textContent) === 'so vestidas');
+      if (opt && sel.value !== opt.value) {
+        sel.value = opt.value;
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        changed = true;
+      }
+    }
+    const chip = document.querySelector('.slForgeEligible');
+    if (chip && chip.getAttribute('aria-pressed') !== 'true') { chip.click(); changed = true; }
+    return changed;
+  }
+
+  async function doEnchant() {
+    if (!(await openForge())) { log('Não consegui abrir a Forja.'); await closePanels(); return; }
+    await sleep(500);
+    const tab = document.querySelector('button.slForgeTab[data-tab="enchant"]');
+    if (tab && !tab.classList.contains('slForgeTabOn')) { click(tab); await sleep(700); }
+
+    // Sem pedra de encanto: nem mexe na lista.
+    const stoneEl = visQ('.slForgeCoinStone b');
+    if (stoneEl && Number(String(stoneEl.innerText).replace(/\D/g, '') || 0) === 0) { await closePanels(); return; }
+
+    if (setForgeFilters()) await sleep(900);
+    await waitFor(forgeIdle, 5000);
+    await sleep(400);
+
+    const done = [];
+    const skipped = new Set();
+    let stop = '';
+    for (let guard = 0; guard < 40; guard++) {
+      const item = forgeItems().find((b) => !skipped.has(forgeKey(b)));
+      if (!item) {
+        // Nada nesta página: passa para a próxima ("›" do paginador), se houver.
+        const next = [...document.querySelectorAll('.slForgePager button.slPagBtn')].filter(visible).pop();
+        if (next && !next.disabled && /›/.test(next.innerText)) {
+          click(next);
+          await sleep(900);
+          await waitFor(forgeIdle, 4000);
+          continue;
+        }
+        break;
+      }
+      const key = forgeKey(item);
+      if (item.getAttribute('aria-pressed') !== 'true') { click(item); await sleep(800); }
+      const card = await waitFor(() => visQ('.slForgeAttempt'), 3000);
+      const txt = norm(card ? card.innerText : '');
+      if (!card || card.classList.contains('slForgeMaxed') || !card.classList.contains('slForgeAttemptSafe') || !/garantido/.test(txt)) {
+        skipped.add(key); // já passou do +5 seguro (ou no máximo): não arrisca
+        continue;
+      }
+      if (/sem pedra/.test(txt)) { stop = 'acabou a pedra de encanto'; break; }
+      if (/faltam .* de ouro/.test(txt)) { stop = 'falta ouro'; break; }
+      const go = card.querySelector('button.slForgeGo');
+      if (!go || go.disabled) { skipped.add(key); continue; }
+      const target = ((card.closest('.slForgeStage') || document).querySelector('.slForgeNew') || {}).innerText || '';
+      click(go);
+      done.push(`${key.split(' · ')[0]} ${String(target).trim()}`.trim());
+      await sleep(jitter(1800));
+      await waitFor(forgeIdle, 4000);
+    }
+    if (done.length) log(`Forja: encantei ${done.length}x (${done.join(', ')})` + (stop ? ` — parei: ${stop}.` : '.'));
     await closePanels();
   }
 
@@ -816,6 +897,7 @@
   let lastRewards = 0;
   let lastMail = 0;
   let lastExped = 0;
+  let lastEnchant = 0;
   let mailSoon = 0;
 
   function readLevel() {
@@ -863,6 +945,11 @@
       if (cfg.autoTeam && (force || now - lastTeam > cfg.teamEveryMin * 60000)) {
         lastTeam = now;
         await doTeam();
+      }
+      // Forja antes das Missões: "Encante um item até +1" já sai resgatado na mesma rodada.
+      if (cfg.autoEnchant && (force || now - lastEnchant > cfg.enchantEveryMin * 60000)) {
+        lastEnchant = now;
+        await doEnchant();
       }
       // Expedições antes das Missões: enviar uma conta para o objetivo diário "Envie 1 expedição".
       if (cfg.autoExped && (force || now - lastExped > cfg.expedEveryMin * 60000)) {
@@ -970,6 +1057,8 @@
         <label>Equipar melhores sozinho<input type="checkbox" data-k="autoEquip"></label>
         <label>Critério<select data-k="criterion">${CRITERIA.map((c) => `<option value="${c.id}">${c.label}</option>`).join('')}</select></label>
         <label>A cada (min)<input type="number" min="2" max="240" data-k="equipEveryMin"></label>
+        <label>Encantar vestidas (só garantido)<input type="checkbox" data-k="autoEnchant"></label>
+        <label>A cada (min)<input type="number" min="5" max="240" data-k="enchantEveryMin"></label>
         <h4>Exército</h4>
         <label>Montar melhor time sozinho<input type="checkbox" data-k="autoTeam"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="teamEveryMin"></label>
@@ -1006,7 +1095,7 @@
         saveCfg();
         paintFab();
         setStatus(cfg.enabled ? 'ligado' : 'desligado');
-        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; lastTalents = 0; lastRewards = 0; lastMail = 0; lastExped = 0; tick(false); }
+        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; lastTalents = 0; lastRewards = 0; lastMail = 0; lastExped = 0; lastEnchant = 0; tick(false); }
       });
       // não deixar as teclas do painel virarem atalho do jogo
       el.addEventListener('keydown', (e) => e.stopPropagation());

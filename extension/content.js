@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.4.0
+// @version      1.5.0
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -56,6 +56,10 @@
     teamEveryMin: 30,
     autoHunt: true,         // vai para a área "Recomendada" pelo jogo nas Caçadas
     huntEveryMin: 20,
+    autoTalents: true,      // investe os pontos de talento pelo plano da build
+    talentBuild: '',        // '' = mesmo nome da build de atributos (ou a 1ª da classe)
+    talentsEveryMin: 20,
+    talentPlanSeen: '',
     knownBuilds: [],
     log: [],
   };
@@ -230,7 +234,7 @@
 
   async function closePanels() {
     for (let i = 0; i < 3; i++) {
-      if (!statusOpen() && !invOpen() && !armyOpen() && !huntsOpen()) break;
+      if (!statusOpen() && !invOpen() && !armyOpen() && !huntsOpen() && !talOpen()) break;
       pressKey('Escape', 'Escape');
       await sleep(350);
     }
@@ -361,6 +365,124 @@
     click(best);
     log('Montei o melhor time do Exército.');
     await sleep(1200);
+    await closePanels();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 3b) Talentos: segue o plano da build (talent-plans.js, gerado da wiki oficial)
+  // ---------------------------------------------------------------------------
+  // A árvore é um SVG: cada nó é um g.slTalNode com data-senda, data-estado
+  // (complete | progress | available | locked), data-fechado (escolha/ramo fechado)
+  // e o rótulo "a/b" ou "MAX". Duplo clique no nó aprende 1 nível, sem confirmação.
+  const PLANS = window.__lvlTalentPlans || null;
+  const TREE_OF = window.__lvlTalentTree || {};
+  const TAL_NAME = window.__lvlTalentName || {};
+  const CLASS_TREES = ['guerreiro', 'assassino', 'mago', 'arqueiro', 'healer'];
+
+  const talTabs = () => [...document.querySelectorAll('.slTalTab')].filter(visible);
+  const talOpen = () => (talTabs().length ? talTabs()[0] : null);
+  const openTalents = () => openFromGameMenu(/^talentos\b/, /(^|\s)cacador$/, talOpen, ['k', 'KeyK']);
+
+  // Pontos para gastar: o título das abas diz "N ponto(s) para gastar" (os pontos valem para todas).
+  function talPoints() {
+    for (const t of talTabs()) {
+      const m = norm(t.getAttribute('title') || '').match(/(\d+) ponto/);
+      if (m) return Number(m[1]);
+    }
+    return 0;
+  }
+  const talClass = () => {
+    const t = talTabs().map((b) => b.dataset.senda).find((s) => CLASS_TREES.includes(s));
+    return t || null;
+  };
+
+  function talNode(id) {
+    for (const g of document.querySelectorAll('g.slTalNode')) {
+      const img = g.querySelector('image.slTalSprite');
+      const href = (img ? img.getAttribute('href') || '' : '').split('?')[0];
+      if (href.endsWith(`/${id}.png`)) return g;
+    }
+    return null;
+  }
+  function talLevel(g) {
+    if (!g) return null;
+    if (g.getAttribute('data-estado') === 'complete') return 99;
+    const lbl = g.querySelector('.slTalLevel');
+    const m = (lbl ? lbl.textContent : '').match(/(\d+)\s*\/\s*\d+/);
+    if (m) return Number(m[1]);
+    return g.getAttribute('data-estado') === 'progress' ? 1 : 0;
+  }
+
+  // Uma aba pode mostrar mais de uma senda (a da classe vem junto com a Fundação),
+  // então procura o nó na aba aberta e, se não estiver, passa pelas outras abas.
+  async function talFind(id) {
+    let g = talNode(id);
+    if (g) return g;
+    const tree = TREE_OF[id];
+    const tabs = talTabs();
+    const ordered = [...tabs.filter((b) => b.dataset.senda === tree), ...tabs.filter((b) => b.dataset.senda !== tree)];
+    for (const tab of ordered) {
+      if (tab.getAttribute('aria-selected') === 'true') continue;
+      click(tab);
+      g = await waitFor(() => talNode(id), 1500);
+      if (g) { await sleep(250); return talNode(id); }
+    }
+    return null;
+  }
+
+  function talPlanFor(cls) {
+    const list = PLANS && PLANS[cls];
+    if (!list || !list.length) return null;
+    const want = cfg.talentBuild || cfg.buildName;
+    return list.find((p) => norm(p.build) === norm(want)) || list[0];
+  }
+
+  async function doTalents() {
+    if (!PLANS) return;
+    // Só abre a árvore quando há pontos: o HUD marca o menu com "pontos" pendentes,
+    // mas o jeito garantido é ler o título das abas com o painel aberto.
+    if (!(await openTalents())) { log('Não consegui abrir os Talentos.'); await closePanels(); return; }
+    await sleep(500);
+    let points = talPoints();
+    const cls = talClass();
+    const plan = cls && talPlanFor(cls);
+    if (!plan) { log('Não achei o plano de talentos da classe.'); await closePanels(); return; }
+    if (cfg.talentPlanSeen !== plan.build) { cfg.talentPlanSeen = plan.build; saveCfg(); renderTalentSelect(); }
+    if (points < 1) { await closePanels(); return; }
+
+    const learned = [];
+    let stop = '';
+    for (const step of plan.passos) {
+      if (points < 1) break;
+      const [id, lvlStr] = step.split(':');
+      const target = Number(lvlStr);
+      let g = await talFind(id);
+      if (!g) continue;
+      let lvl = talLevel(g);
+      while (lvl < target && points > 0) {
+        if (g.hasAttribute('data-fechado') || g.getAttribute('data-estado') === 'locked') break; // fechado: pula
+        g.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window }));
+        const ok = await waitFor(() => {
+          const ng = talNode(id);
+          return ng && talLevel(ng) > lvl ? ng : null;
+        }, 3000, 200);
+        if (!ok) { stop = `faltam pontos para ${TAL_NAME[id] || id}`; break; }
+        g = ok;
+        lvl = talLevel(g);
+        learned.push(id);
+        await sleep(jitter(350));
+        points = talPoints();
+      }
+      if (stop) break;
+    }
+    if (learned.length) {
+      const counts = {};
+      for (const id of learned) counts[id] = (counts[id] || 0) + 1;
+      log(`Talentos (${plan.build}): ${Object.entries(counts).map(([k, v]) => `${TAL_NAME[k] || k} +${v}`).join(', ')}.`);
+    } else if (stop && points >= 1) {
+      log(`Talentos: ${stop}`);
+    }
+    await sleep(500);
     await closePanels();
   }
 
@@ -533,6 +655,7 @@
   let lastPoints = 0;
   let lastTeam = 0;
   let lastHunt = 0;
+  let lastTalents = 0;
 
   function readLevel() {
     const card = document.querySelector('.slHudCard');
@@ -568,6 +691,10 @@
         lastPoints = now;
         await doPoints();
       }
+      if (cfg.autoTalents && (force || now - lastTalents > cfg.talentsEveryMin * 60000)) {
+        lastTalents = now;
+        await doTalents();
+      }
       if (cfg.autoEquip && (force || levelUp || now - lastEquip > cfg.equipEveryMin * 60000)) {
         lastEquip = now;
         await doEquip();
@@ -600,7 +727,22 @@
   // ---------------------------------------------------------------------------
   // Painel
   // ---------------------------------------------------------------------------
-  let $status, $log, $buildSel;
+  let $status, $log, $buildSel, $talSel;
+
+  // Planos da classe atual (descoberta ao abrir os Talentos; antes disso, mostra todos).
+  function renderTalentSelect() {
+    if (!$talSel || !PLANS) return;
+    const cls = Object.keys(PLANS).find((c) => PLANS[c].some((p) => p.build === cfg.talentPlanSeen));
+    const names = cls ? PLANS[cls].map((p) => p.build) : Object.values(PLANS).flat().map((p) => p.build);
+    $talSel.innerHTML = '';
+    for (const n of ['', ...names]) {
+      const o = document.createElement('option');
+      o.value = n;
+      o.textContent = n || 'Igual à build de atributos';
+      if (norm(n) === norm(cfg.talentBuild)) o.selected = true;
+      $talSel.appendChild(o);
+    }
+  }
 
   function setStatus(s) { if ($status) $status.textContent = s; }
   function renderLog() { if ($log) $log.textContent = (cfg.log || []).join('\n'); }
@@ -644,6 +786,10 @@
         <label>Build<select data-k="buildName"></select></label>
         <label>Mínimo de pontos<input type="number" min="1" max="500" data-k="minPoints"></label>
         <label>Checar a cada (min)<input type="number" min="2" max="240" data-k="pointsEveryMin"></label>
+        <h4>Talentos</h4>
+        <label>Investir sozinho<input type="checkbox" data-k="autoTalents"></label>
+        <label>Plano<select data-k="talentBuild"></select></label>
+        <label>Checar a cada (min)<input type="number" min="5" max="240" data-k="talentsEveryMin"></label>
         <h4>Equipamento</h4>
         <label>Equipar melhores sozinho<input type="checkbox" data-k="autoEquip"></label>
         <label>Critério<select data-k="criterion">${CRITERIA.map((c) => `<option value="${c.id}">${c.label}</option>`).join('')}</select></label>
@@ -663,6 +809,7 @@
     $status = root.querySelector('.st');
     $log = root.querySelector('pre');
     $buildSel = root.querySelector('select[data-k="buildName"]');
+    $talSel = root.querySelector('select[data-k="talentBuild"]');
     const fab = root.querySelector('.fab');
 
     const paintFab = () => { fab.classList.toggle('on', !!cfg.enabled); fab.textContent = cfg.enabled ? 'AUTO ✓' : 'AUTO'; };
@@ -670,7 +817,7 @@
     for (const el of root.querySelectorAll('[data-k]')) {
       const k = el.dataset.k;
       if (el.type === 'checkbox') el.checked = !!cfg[k];
-      else if (k !== 'buildName') el.value = cfg[k];
+      else if (k !== 'buildName' && k !== 'talentBuild') el.value = cfg[k];
       el.addEventListener('change', () => {
         if (el.type === 'checkbox') cfg[k] = el.checked;
         else if (el.type === 'number' || k === 'criterion') cfg[k] = Number(el.value) || DEFAULTS[k];
@@ -678,7 +825,7 @@
         saveCfg();
         paintFab();
         setStatus(cfg.enabled ? 'ligado' : 'desligado');
-        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; tick(false); }
+        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; lastTalents = 0; tick(false); }
       });
       // não deixar as teclas do painel virarem atalho do jogo
       el.addEventListener('keydown', (e) => e.stopPropagation());
@@ -688,6 +835,7 @@
     fab.addEventListener('click', () => root.classList.toggle('open'));
 
     renderBuildSelect();
+    renderTalentSelect();
     renderLog();
     paintFab();
     setStatus(cfg.enabled ? 'ligado' : 'desligado');

@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Leveling Idle - Auto Pontos, Equipar e Exercito",
-  "version": "1.4.0",
-  "description": "Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exercito e vai para a area recomendada.",
+  "version": "1.5.0",
+  "description": "Distribui pontos e talentos pela build, equipa os melhores itens, monta o melhor time do Exercito e vai para a area recomendada.",
   "content_scripts": [
     {
       "matches": ["https://levelingidle2d.com.br/jogar*"],
-      "js": ["content.js"],
+      "js": ["talent-plans.js", "content.js"],
       "run_at": "document_idle"
     }
   ]

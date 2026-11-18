@@ -69,6 +69,13 @@
     deathLimit: 2,          // mortes...
     deathWindowMin: 15,     // ...dentro desta janela
     deathPauseMin: 60,      // por quanto tempo fica na área de baixo
+    autoShop: true,         // vai até o Brok na cidade e completa poções e Revivers
+    shopEveryHours: 6,
+    shopHp: 300,            // Poção Grande
+    shopMp: 100,            // Poção de Mana Grande
+    shopRevive: 20,         // Reviver Grande
+    shopGoldReserve: 20000, // nunca deixa o ouro cair abaixo disto
+    lastShop: 0,
     deaths: [],
     huntPauseUntil: 0,
     talentPlanSeen: '',
@@ -900,6 +907,118 @@
     await closePanels();
   }
 
+
+  // ---------------------------------------------------------------------------
+  // 9) Loja do Brok: só abre falando com ele na cidade. O caçador sempre aparece no
+  // mesmo ponto ao sair da caçada (na escada, debaixo do portal); dali o Brok fica
+  // embaixo e à esquerda. Anda com as setas, aperta E e, se a loja não abrir, procura
+  // em volta. Depois volta para a caçada pela rotina normal de área.
+  // ---------------------------------------------------------------------------
+  function inHunt() {
+    const b = document.querySelector('button.slHudQbLeave');
+    return !!b && !b.hidden && visible(b);
+  }
+  function shopOpen() { return [...document.querySelectorAll('.slShopCard')].some(visible); }
+  async function walk(code, ms) {
+    const o = { key: code, code, bubbles: true, cancelable: true };
+    window.dispatchEvent(new KeyboardEvent('keydown', o));
+    await sleep(ms);
+    window.dispatchEvent(new KeyboardEvent('keyup', o));
+    await sleep(150);
+  }
+  async function talk() {
+    const o = { key: 'e', code: 'KeyE', bubbles: true, cancelable: true };
+    window.dispatchEvent(new KeyboardEvent('keydown', o));
+    window.dispatchEvent(new KeyboardEvent('keyup', o));
+    return !!(await waitFor(shopOpen, 1300));
+  }
+  const num = (t) => Number(String(t || '').replace(/[^\d]/g, '')) || 0;
+  function shopGold() {
+    const p = [...document.querySelectorAll('.slShopPurse')].find((e) => visible(e) && !/Dia|Golden/.test(e.className));
+    return p ? num(p.innerText) : 0;
+  }
+  function shopCard(name) {
+    return [...document.querySelectorAll('.slShopCard')].filter(visible).find((c) => {
+      const s = c.querySelector('.slShopName strong');
+      return s && norm(s.innerText) === norm(name);
+    }) || null;
+  }
+  const ownedOf = (c) => num((c.querySelector('.slShopOwned') || {}).innerText);
+  const priceOf = (c) => num(((c.querySelector('.slShopPrice') || {}).innerText || '').split(/cada/i)[0]);
+
+  async function buyItem(name, target) {
+    let bought = 0;
+    for (let i = 0; i < 40; i++) {
+      const card = shopCard(name);
+      if (!card) { if (!i) log(`Loja: não achei "${name}".`); break; }
+      const have = ownedOf(card), price = priceOf(card);
+      const need = target - have;
+      if (need <= 0 || !price) break;
+      const afford = Math.floor((shopGold() - cfg.shopGoldReserve) / price);
+      const qty = [50, 10, 1].find((q) => q <= need && q <= afford);
+      if (!qty) { if (afford < 1) log(`Loja: ouro no limite da reserva (${cfg.shopGoldReserve}); parei em ${name}.`); break; }
+      const chip = [...card.querySelectorAll('.slShopQuick button')].find((b) => num(b.innerText) === qty);
+      if (!chip) break;
+      click(chip);
+      await sleep(250);
+      const before = new Set(buttons());
+      click(card.querySelector('.slShopBuy'));
+      const ok = await waitFor(() => buttons().find((b) => !before.has(b) && /^(adquirir|comprar)\b/.test(norm(b.innerText))), 3000);
+      if (!ok) break;
+      click(ok);
+      const got = await waitFor(() => { const c = shopCard(name); return c && ownedOf(c) > have; }, 5000);
+      if (!got) break;
+      bought += qty;
+      await sleep(300);
+    }
+    return bought;
+  }
+
+  async function doShop() {
+    cfg.lastShop = Date.now();
+    saveCfg();
+    await closePanels();
+    if (inHunt()) {
+      const leave = document.querySelector('button.slHudQbLeave');
+      const before = new Set(buttons());
+      click(leave);
+      const ok = await waitFor(() => buttons().find((b) => !before.has(b) && /^sair da cacada\b/.test(norm(b.innerText))), 4000);
+      if (!ok) { log('Loja: não consegui sair da caçada.'); return; }
+      click(ok);
+      if (!(await waitFor(() => !inHunt(), 8000))) { log('Loja: a caçada não fechou.'); return; }
+      await sleep(3000); // cena da cidade carregando
+    }
+    // Rota a partir do ponto de chegada: ~2,1 s para baixo e ~1,5 s para a esquerda.
+    await walk('ArrowDown', 2100);
+    await walk('ArrowLeft', 1500);
+    let open = await talk();
+    const search = [['ArrowLeft', 300], ['ArrowRight', 600], ['ArrowLeft', 300], ['ArrowUp', 300], ['ArrowDown', 600],
+      ['ArrowUp', 300], ['ArrowLeft', 600], ['ArrowDown', 300], ['ArrowRight', 1200], ['ArrowUp', 600], ['ArrowLeft', 1200]];
+    for (const [k, ms] of search) {
+      if (open) break;
+      await walk(k, ms);
+      open = await talk();
+    }
+    if (!open) { log('Loja: não achei o Brok (voltei para a caçada).'); lastHunt = 0; await doHunt(); return; }
+    await sleep(500);
+    const tab = findButton((t) => /^consumiveis\b/.test(t));
+    if (tab) { click(tab); await sleep(400); }
+    const all = findButton((t) => /^todos\b/.test(t));
+    if (all) { click(all); await sleep(400); }
+    const done = [];
+    for (const [name, target] of [['Poção Grande', cfg.shopHp], ['Poção de Mana Grande', cfg.shopMp], ['Reviver Grande', cfg.shopRevive]]) {
+      if (!(target > 0)) continue;
+      const n = await buyItem(name, target);
+      if (n) done.push(`${n} ${name}`);
+    }
+    log(done.length ? `Loja do Brok: comprei ${done.join(', ')}.` : 'Loja do Brok: estoque já estava completo.');
+    pressKey('Escape', 'Escape');
+    await sleep(500);
+    if (shopOpen()) { pressKey('Escape', 'Escape'); await sleep(400); }
+    lastHunt = 0;
+    await doHunt();
+  }
+
   // ---------------------------------------------------------------------------
   // Loop
   // ---------------------------------------------------------------------------
@@ -981,6 +1100,12 @@
         lastMail = now;
         mailSoon = 0;
         await doMail();
+      }
+      // Loja: a cada N horas, ou logo que estiver na cidade (ex.: depois de morrer).
+      const shopAge = now - (cfg.lastShop || 0);
+      if (cfg.autoShop && !force && (shopAge > cfg.shopEveryHours * 3600000 || (!inHunt() && shopAge > 30 * 60000))) {
+        await doShop();
+        lastHunt = now;
       }
       if (cfg.autoHunt && (force || levelUp || now - lastHunt > cfg.huntEveryMin * 60000)) {
         lastHunt = now;
@@ -1124,7 +1249,14 @@
         <label>Descer de área após mortes<input type="checkbox" data-k="deathGuard"></label>
         <label>Mortes em 15 min para descer<input type="number" min="1" max="10" data-k="deathLimit"></label>
         <label>Ficar na área de baixo (min)<input type="number" min="5" max="480" data-k="deathPauseMin"></label>
-        <div class="row"><button data-act="now">Rodar agora</button><button data-act="clear">Limpar log</button></div>
+        <h4>Loja do Brok</h4>
+        <label>Comprar poções e Revivers<input type="checkbox" data-k="autoShop"></label>
+        <label>A cada (horas)<input type="number" min="1" max="48" data-k="shopEveryHours"></label>
+        <label>Poção Grande (manter)<input type="number" min="0" max="5000" data-k="shopHp"></label>
+        <label>Mana Grande (manter)<input type="number" min="0" max="5000" data-k="shopMp"></label>
+        <label>Reviver Grande (manter)<input type="number" min="0" max="500" data-k="shopRevive"></label>
+        <label>Reserva de ouro<input type="number" min="0" max="99999999" data-k="shopGoldReserve"></label>
+        <div class="row"><button data-act="now">Rodar agora</button><button data-act="shop">Comprar agora</button><button data-act="clear">Limpar log</button></div>
         <pre></pre>
       </div>
       <button class="fab">AUTO</button>`;
@@ -1144,7 +1276,7 @@
       else if (k !== 'buildName' && k !== 'talentBuild') el.value = cfg[k];
       el.addEventListener('change', () => {
         if (el.type === 'checkbox') cfg[k] = el.checked;
-        else if (el.type === 'number' || k === 'criterion') cfg[k] = Number(el.value) || DEFAULTS[k];
+        else if (el.type === 'number' || k === 'criterion') cfg[k] = el.value !== '' && Number.isFinite(Number(el.value)) ? Number(el.value) : DEFAULTS[k];
         else cfg[k] = el.value;
         saveCfg();
         paintFab();
@@ -1155,6 +1287,12 @@
       el.addEventListener('keydown', (e) => e.stopPropagation());
     }
     root.querySelector('[data-act="now"]').addEventListener('click', () => tick(true));
+    root.querySelector('[data-act="shop"]').addEventListener('click', async () => {
+      if (running) return;
+      running = true; setStatus('indo na loja…');
+      try { await doShop(); } catch (e) { log('Erro: ' + (e && e.message ? e.message : e)); }
+      finally { running = false; setStatus(cfg.enabled ? 'ligado' : 'desligado'); }
+    });
     root.querySelector('[data-act="clear"]').addEventListener('click', () => { cfg.log = []; saveCfg(); renderLog(); });
     fab.addEventListener('click', () => root.classList.toggle('open'));
 

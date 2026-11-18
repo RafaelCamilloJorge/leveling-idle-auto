@@ -1,4 +1,4 @@
-# Leveling Idle – Auto Pontos, Talentos, Equipar, Encantar, Exército, Caçada e Recompensas
+# Leveling Idle – Auto Pontos, Talentos, Equipar, Encantar, Exército, Caçada, Recompensas e Loja
 
 Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que automatiza tarefas repetitivas do [Leveling Idle 2D](https://levelingidle2d.com.br/jogar), clicando só nos botões que o próprio jogo já tem:
 
@@ -14,6 +14,7 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 | Missões | Missões → **Resgatar** (Jornada do Caçador e objetivos diários prontos) | A cada 15 min |
 | Recompensa Diária | Recompensas Diárias → **Resgatar** | A cada 15 min |
 | Correio | Correio → **Reivindicar tudo** (e de novo ~1 min depois de resgatar a Diária) | A cada 15 min |
+| Loja do Brok | Sai da caçada, anda até o **Brok** em Seul (setas + **E**), completa **Poção Grande**, **Poção de Mana Grande** e **Reviver Grande** até a meta, respeitando uma reserva de ouro, e volta para a caçada | A cada 6 h, ou logo que a conta estiver na cidade (ex.: depois de morrer) |
 
 > **Em party** a área precisa servir para todo mundo: o limite é o **menor nível** entre você e
 > os membros (lido no quadro da party). A extensão escolhe a maior área da trilha que começa até
@@ -24,6 +25,13 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 > 5 níveis menor) por 60 min e depois volta para a área normal. Ela também fecha o aviso
 > "Seu caçador morreu" e não mexe em nada enquanto o caçador está caído. Não impede o líder da
 > party de puxar o grupo de volta.
+
+> **Loja do Brok:** a loja só abre falando com ele na cidade. O caçador sempre aparece no mesmo
+> ponto ao sair da caçada (na escada, debaixo do portal); a extensão anda ~2 s para baixo e ~1,5 s
+> para a esquerda, aperta **E** e, se a loja não abrir, procura em volta. Metas padrão: 300 Poções
+> Grandes, 100 de Mana Grande, 20 Revivers Grandes, sem deixar o ouro cair abaixo de 20.000. Tem um
+> botão **Comprar agora** no painel. Se o mapa de Seul mudar, a rota pode parar de achar o Brok
+> (o log avisa "não achei o Brok").
 
 Tudo é configurável no botão **AUTO** que aparece no canto inferior esquerdo do jogo.
 
@@ -108,6 +116,7 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
 
 ## Histórico
 
+- **1.9.0** – Loja do Brok: vai até ele na cidade e completa poções grandes, mana grande e Revivers, com reserva de ouro
 - **1.8.0** – Trava de morte: conta as mortes e, com 2 em 15 min, caça uma área abaixo por 60 min
   (configurável no painel). Fecha o aviso de morte e pausa as ações enquanto o caçador está caído.
 

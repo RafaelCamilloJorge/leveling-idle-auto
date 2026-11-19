@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.14.0
+// @version      1.15.1
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -59,7 +59,8 @@
     autoTeam: true,         // roda o "Montar melhor time" do Exército
     teamEveryMin: 30,
     shadowGear: true,       // "Equipar melhores" em cada sombra do time
-    shadowTrainee: true,    // vaga 6 para a sombra de fora com multiplicadores melhores (para upar)
+    shadowTrainee: true,    // vagas de treino: sombra de fora com multiplicadores melhores (para upar)
+    traineeSlots: 2,        // 1 = só a vaga 6; 2 = vagas 5 e 6
     autoHunt: true,         // vai para a área "Recomendada" pelo jogo nas Caçadas
     huntEveryMin: 20,
     expCompare: true,       // sozinho: mede o EXP/h da recomendada e da área logo abaixo e fica na melhor
@@ -69,7 +70,7 @@
     talentsEveryMin: 20,
     autoRewards: true,      // resgata Missões, Diária e Correio
     rewardsEveryMin: 15,
-    autoExped: true,        // coleta e manda Sombras do Armazém em expedição
+    autoExped: true,        // coleta e manda Sombras de fora do time em expedição
     expedEveryMin: 20,
     autoEnchant: true,      // encanta as peças vestidas só enquanto for "Garantido" (até +5)
     enchantEveryMin: 30,
@@ -85,7 +86,9 @@
     shopHp: 300,            // Poção Grande
     shopMp: 100,            // Poção de Mana Grande
     shopRevive: 20,         // Reviver Grande
-    shopEssence: 1000,      // Essência de Extração (ARISE), 1 de ouro cada
+    shopEssence: 1000,      // Essência de Extração (ARISE), 1 de ouro cada: mínimo; sobe com os abates/h medidos
+    shopSellJunk: false,    // vende ao Brok as peças Comum e Incomum que sobram na mochila
+    lastKph: 0,
     shopGoldReserve: 20000, // nunca deixa o ouro cair abaixo disto
     lastShop: 0,
     deaths: [],
@@ -220,7 +223,7 @@
     const b = document.querySelector('.slShBestBtn');
     return visible(b) ? b : null;
   };
-  const armyOpen = () => armyBestBtn() || [...document.querySelectorAll('.slShTeamGrid, .slShExPill')].find(visible) || null;
+  const armyOpen = () => armyBestBtn() || [...document.querySelectorAll('.slShTeam, .slShExPill')].find(visible) || null;
 
   // Itens dos menus do jogo (button.slGmItem com rótulo .slGmItemLabel).
   // labelRe pode ser o id do painel (data-id do item, ex.: 'mail') ou um regex do rótulo.
@@ -570,57 +573,66 @@
     if (!best) { log('Botão "Montar melhor time" não apareceu.'); await closePanels(); return; }
     if (best.disabled) log('Time já é o melhor.');
     else { click(best); log('Montei o melhor time do Exército.'); await sleep(1200); }
-    if (cfg.shadowTrainee) await trainSlot();
+    if (cfg.shadowTrainee) for (const slot of [6, 5].slice(0, cfg.traineeSlots === 1 ? 1 : 2)) await trainSlot(slot);
     if (cfg.shadowGear) await gearTeam();
     await closePanels();
   }
 
-  // Cards do time (aba Time): .slShTCard com o número da vaga em .slShTCardSlot; vaga vazia = .slShTCardEmpty.
-  const teamCard = (slot) => [...document.querySelectorAll('.slShTeamGrid .slShTCard')]
+  // Cards do time (aba Time, quadro .slShTeam: vaga 1 em campo e vagas 2–6): .slShTCard com o número
+  // da vaga em .slShTCardSlot; vaga vazia = .slShTCardEmpty.
+  const teamCard = (slot) => [...document.querySelectorAll('.slShTeam .slShTCard')]
     .find((c) => norm(c.querySelector('.slShTCardSlot')?.textContent) === String(slot));
   const teamSideBtn = (label) => waitFor(() => [...document.querySelectorAll('.slShTeamSide button')]
     .find((b) => visible(b) && norm(b.innerText) === label), 2000);
 
-  // Multiplicadores fixos da sombra que aparecem no card (wiki: rank, Desperta, Potencial pela
-  // qualidade, especialização Monarca). O nível não entra: ele sobe sozinho no time.
-  // shortcut: a origem do corpo (×1 a ×2) não aparece no card e fica de fora da conta.
+  // Multiplicadores fixos da sombra que aparecem no card (wiki: rank, Desperta +50%, Monarca +5%).
+  // O nível não entra: ele sobe sozinho no time.
+  // shortcut: a origem do corpo (×1 a ×2) e o Potencial (até +35%) não aparecem na lista de escolha
+  // e ficam de fora da conta.
   const RANK_MULT = { normal: 1, elite: 1.25, cavaleiro: 1.6, 'cavaleiro de elite': 2, general: 2.6, marechal: 3.3, 'grande marechal': 4.2 };
-  const QUALITY_MULT = { bruta: 1, refinada: 1.1, superior: 1.25, perfeita: 1.35, absoluta: 1.45 };
   function shadowMult(el) {
-    const t = (sel) => norm(el.querySelector(sel)?.textContent).replace(/[\d.,]/g, '').trim();
-    return (RANK_MULT[t('.slShRank')] || 1) * (QUALITY_MULT[t('.slShQ')] || 1)
-      * (el.querySelector('.slShAwake') ? 1.2 : 1) * (el.querySelector('.slShSpecRare') ? 1.05 : 1);
+    const rank = norm(el.querySelector('.slShRank')?.textContent).replace(/[\d.,]/g, '').trim();
+    return (RANK_MULT[rank] || 1) * (el.querySelector('.slShAwake') ? 1.5 : 1) * (el.querySelector('.slShMonarch') ? 1.05 : 1);
   }
 
-  // Vaga de treino: o "Montar melhor time" olha só o poder de agora, então uma sombra de nível
-  // baixo com multiplicadores melhores nunca entra para upar. Troca a vaga 6 pela de fora do time
-  // com o maior multiplicador (10% acima da que sai). A lista do jogo mostra as 40 mais fortes.
-  async function trainSlot() {
-    const last = teamCard(6);
+  // Vagas de treino: o "Montar melhor time" olha só o poder de agora, então uma sombra de nível
+  // baixo com multiplicadores melhores nunca entra para upar. Troca a vaga (6, e a 5 com 2 vagas)
+  // pela de fora do time com o maior multiplicador (10% acima da que sai). As vagas 5 e 6 quase
+  // nunca vão a campo: não levam dano, ganham EXP e só usam o especial.
+  async function trainSlot(slot) {
+    const last = teamCard(slot);
     if (!last || last.classList.contains('slShTCardEmpty')) return; // time incompleto: o "Montar melhor time" resolve
     const outMult = shadowMult(last);
+    const outName = norm(last.querySelector('.slShTCardName')?.textContent);
     click(last);
     const rm = await teamSideBtn('tirar do time');
     if (!rm) return;
     click(rm);
-    const empty = await waitFor(() => (teamCard(6)?.classList.contains('slShTCardEmpty') ? teamCard(6) : null), 3000);
+    const empty = await waitFor(() => (teamCard(slot)?.classList.contains('slShTCardEmpty') ? teamCard(slot) : null), 3000);
     if (!empty) return;
     click(empty);
     await waitFor(() => document.querySelector('.slShSwap .slShSwapCard'), 4000);
-    const pick = [...document.querySelectorAll('.slShSwap .slShSwapCard')]
+    const cards = [...document.querySelectorAll('.slShSwap .slShSwapCard')];
+    const nameOf = (el) => (el.querySelector('.slShSwapName')?.textContent || 'sombra').trim();
+    const pick = cards
       .map((el) => ({ el, mult: shadowMult(el), power: num(el.querySelector('.slShPower')?.textContent) }))
       .filter((c) => c.mult >= outMult * 1.1)
       .sort((a, b) => b.mult - a.mult || b.power - a.power)[0];
     if (pick) { // a lista do jogo já esconde as sombras fora do seu comando
-      const name = (pick.el.querySelector('.slShSwapName')?.textContent || 'sombra').trim();
       click(pick.el);
-      await waitFor(() => !teamCard(6)?.classList.contains('slShTCardEmpty'), 3000);
-      log(`Sombras: ${name} entrou na vaga 6 para treinar (×${pick.mult.toFixed(2)} contra ×${outMult.toFixed(2)}).`);
+      await waitFor(() => !teamCard(slot)?.classList.contains('slShTCardEmpty'), 3000);
+      log(`Sombras: ${nameOf(pick.el)} entrou na vaga ${slot} para treinar (×${pick.mult.toFixed(2)} contra ×${outMult.toFixed(2)}).`);
+      return;
+    }
+    // Sem sombra melhor: devolve a mesma sombra à vaga (o "Montar melhor time" desfaria a outra vaga de treino).
+    const same = outName && cards.find((el) => norm(nameOf(el)) === outName);
+    if (same) {
+      click(same);
+      await waitFor(() => !teamCard(slot)?.classList.contains('slShTCardEmpty'), 3000);
       return;
     }
     const cancel = [...document.querySelectorAll('.slShSwap button')].find((b) => visible(b) && norm(b.innerText) === 'cancelar');
     if (cancel) { click(cancel); await sleep(400); }
-    // Sem sombra melhor: o "Montar melhor time" devolve a vaga 6.
     const best = await waitFor(() => { const b = armyBestBtn(); return b && !b.disabled ? b : null; }, 2000);
     if (best) { click(best); await sleep(1200); }
   }
@@ -745,8 +757,8 @@
       await sleep(600);
     }
 
-    // Filtro "Armazém" para nunca mandar Sombra do time.
-    const storTab = findButton((t) => /^armazem\b/.test(t));
+    // Filtro "Fora do time" (antes "Armazém") para nunca mandar Sombra do time.
+    const storTab = findButton((t) => /^(fora do time|armazem)\b/.test(t));
     if (storTab) { click(storTab); await sleep(500); }
 
     let sent = 0;
@@ -755,7 +767,7 @@
       const s = expSlots();
       if (!s || s.away >= s.total) break;
       const cand = [...document.querySelectorAll('.slShExCand')].filter(visible)
-        .find((c) => !tried.has(c.dataset.uid) && /armazem/.test(norm(c.innerText)));
+        .find((c) => !tried.has(c.dataset.uid) && /fora do time|armazem/.test(norm(c.innerText)));
       if (!cand) break;
       tried.add(cand.dataset.uid);
       click(cand);
@@ -786,7 +798,7 @@
       sent++;
       await sleep(jitter(1400));
     }
-    if (sent) log(`Expedições: mandei ${sent} Sombra(s) do Armazém.`);
+    if (sent) log(`Expedições: mandei ${sent} Sombra(s) de fora do time.`);
     // Volta o Exército para a aba "Time" (o "Montar melhor time" depende dela).
     const teamTab = findButton((t) => /^time\b/.test(t));
     if (teamTab) { click(teamTab); await sleep(300); }
@@ -1108,6 +1120,8 @@
   function logStats() {
     const r = huntRate(), kph = huntStat('abates/h'), gph = huntStat('ouro/h');
     if (!r || kph == null || r.secs < 600) return false;
+    cfg.lastKph = kph; // a Loja usa para a meta de essência
+    saveCfg();
     log(`Caçada: ${fmtCompact(r.xph)} EXP/h · ${fmtCompact(kph)} abates/h${gph != null ? ` · ${fmtCompact(gph)} ouro/h` : ''}`
       + ` (essência para ${cfg.shopEveryHours} h: ~${fmtCompact(kph * cfg.shopEveryHours)}).`);
     return true;
@@ -1247,32 +1261,95 @@
   const ownedOf = (c) => num((c.querySelector('.slShopOwned') || {}).innerText);
   const priceOf = (c) => num(((c.querySelector('.slShopPrice') || {}).innerText || '').split(/cada/i)[0]);
 
+  // Compra o que falta para a meta numa compra só: digita a quantidade no campo do card
+  // (input.slNumInput), que o jogo limita ao estoque máximo (poções 10.000, Revivers 999) e ao ouro.
   async function buyItem(name, target) {
-    let bought = 0;
-    for (let i = 0; i < 40; i++) {
-      const card = shopCard(name);
-      if (!card) { if (!i) log(`Loja: não achei "${name}".`); break; }
-      const have = ownedOf(card), price = priceOf(card);
-      const need = target - have;
-      if (need <= 0 || !price) break;
-      const afford = Math.floor((shopGold() - cfg.shopGoldReserve) / price);
-      const qty = [50, 10, 1].find((q) => q <= need && q <= afford);
-      if (!qty) { if (afford < 1) log(`Loja: ouro no limite da reserva (${cfg.shopGoldReserve}); parei em ${name}.`); break; }
-      const chip = [...card.querySelectorAll('.slShopQuick button')].find((b) => num(b.innerText) === qty);
-      if (!chip) break;
-      click(chip);
-      await sleep(250);
-      const before = new Set(buttons());
-      click(card.querySelector('.slShopBuy'));
-      const ok = await waitFor(() => buttons().find((b) => !before.has(b) && /^(adquirir|comprar)\b/.test(norm(b.innerText))), 3000);
-      if (!ok) break;
-      click(ok);
-      const got = await waitFor(() => { const c = shopCard(name); return c && ownedOf(c) > have; }, 5000);
-      if (!got) break;
-      bought += qty;
-      await sleep(300);
+    const card = shopCard(name);
+    if (!card) { log(`Loja: não achei "${name}".`); return 0; }
+    const have = ownedOf(card), price = priceOf(card);
+    const need = target - have;
+    if (need <= 0 || !price) return 0;
+    const afford = Math.floor((shopGold() - cfg.shopGoldReserve) / price);
+    if (afford < 1) { log(`Loja: ouro no limite da reserva (${cfg.shopGoldReserve}); parei em ${name}.`); return 0; }
+    const input = card.querySelector('input.slNumInput');
+    const buy = card.querySelector('.slShopBuy');
+    if (!input || !buy) { log(`Loja: o card de "${name}" mudou; não comprei.`); return 0; }
+    input.value = String(Math.min(need, afford));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+    await sleep(300);
+    if (!(Number(input.value) > 0) || buy.disabled) return 0;
+    const before = new Set(buttons());
+    click(buy);
+    const ok = await waitFor(() => buttons().find((b) => !before.has(b) && /^(adquirir|comprar)\b/.test(norm(b.innerText))), 3000);
+    if (!ok) return 0;
+    click(ok);
+    const got = await waitFor(() => { const c = shopCard(name); return c && ownedOf(c) > have ? c : null; }, 5000);
+    return got ? ownedOf(got) - have : 0;
+  }
+
+  // Maior tamanho já liberado no nível (o card trancado ganha .slShopOff): Grande a partir do 20, Média do 10.
+  const SHOP_SIZES = [
+    [['Poção Grande', 'Poção Média', 'Poção Pequena'], 'shopHp'],
+    [['Poção de Mana Grande', 'Poção de Mana Média', 'Poção de Mana Pequena'], 'shopMp'],
+    [['Reviver Grande', 'Reviver Médio', 'Reviver Pequeno'], 'shopRevive'],
+  ];
+  const ESSENCE_MAX = 9999; // limite da pilha
+  // Meta de essência: o mínimo do painel ou os abates/h medidos × horas até a próxima ida (+20%).
+  const essenceTarget = (min, kph, hours) => Math.min(ESSENCE_MAX, Math.max(min, Math.ceil((kph || 0) * hours * 1.2)));
+  console.assert(essenceTarget(1000, 800, 6) === 5760 && essenceTarget(1000, 5000, 6) === ESSENCE_MAX
+    && essenceTarget(1000, 0, 6) === 1000, '[leveling-idle-auto] meta de essência quebrou');
+
+  // Vende ao Brok as peças Comum e Incomum que sobram na mochila (tela "Vender itens").
+  // O jogo já esconde as vestidas, as das sombras, gemas, essências e pedras; as trancadas não marcam.
+  const SELL_RARITIES = ['comum', 'incomum'];
+  const SELL_CATEGORIES = ['armas', 'armadura', 'acessorios']; // nunca "Materiais" nem "Materiais de Imbuimento"
+  async function sellJunk() {
+    const openBtn = visQ('.slShopSell');
+    if (!openBtn) return;
+    click(openBtn);
+    const back = async () => { const b = visQ('.slSellBack'); if (b) { click(b); await waitFor(shopOpen, 4000); } };
+    if (!(await waitFor(() => (visQ('.slSellListInfo')?.textContent || '').trim(), 10000))) {
+      log('Loja: a lista de venda não carregou.');
+      await back();
+      return;
     }
-    return bought;
+    const chips = (g) => [...([...(visQ('.slSellFilters')?.querySelectorAll('.slChips') || [])][g]?.querySelectorAll('button.slChip') || [])];
+    const label = (b) => norm(b.firstChild?.textContent);
+    const on = (g) => chips(g).filter((b) => b.classList.contains('slChipOn')).map(label);
+    for (const r of SELL_RARITIES) {
+      const b = chips(1).find((x) => label(x) === r);
+      if (b && !b.classList.contains('slChipOn')) { click(b); await sleep(300); }
+    }
+    // Sem raridade marcada o filtro mostra TODAS: só marca com Comum/Incomum ligados e nada além.
+    const safe = (cat) => on(0).join() === cat && on(1).length > 0 && on(1).every((r) => SELL_RARITIES.includes(r));
+    for (const cat of SELL_CATEGORIES) {
+      const b = chips(0).find((x) => label(x) === cat);
+      if (!b) continue; // nada dessa categoria na mochila
+      click(b);
+      await sleep(400);
+      if (!safe(cat)) continue;
+      const mark = buttons(visQ('.slSellBar') || document).find((x) => /^marcar todos/.test(norm(x.innerText)));
+      if (mark && !mark.disabled) { click(mark); await sleep(300); }
+    }
+    const go = visQ('.slSellGo');
+    if (go && !go.disabled) {
+      const count = num((visQ('.slSellSumCount')?.textContent || '').split('·')[0]);
+      const gold = num(visQ('.slSellSumGold')?.textContent);
+      const before = new Set(buttons());
+      click(go);
+      const dlg = await waitFor(() => visQ('.slSellConfirm'), 3000);
+      const pick = (re) => buttons().find((x) => !before.has(x) && visible(x) && re.test(norm(x.innerText)));
+      if (dlg && !dlg.querySelector('.slSellConfirmRare')) { // aviso de Épica ou melhor: não vende
+        const ok = await waitFor(() => pick(/^vender$/), 2000);
+        if (ok) { click(ok); log(`Loja: vendi ${count} peça(s) Comum/Incomum por ${gold.toLocaleString('pt-BR')} de ouro.`); await sleep(1500); }
+      } else if (dlg) {
+        const cancel = pick(/^cancelar$/);
+        if (cancel) click(cancel);
+        log('Loja: a venda incluía peça Épica ou melhor; cancelei.');
+        await sleep(400);
+      }
+    }
+    await back();
   }
 
   async function doShop() {
@@ -1302,22 +1379,27 @@
     }
     if (!open) { log('Loja: não achei o Brok (voltei para a caçada).'); lastHunt = 0; await doHunt(); return; }
     await sleep(500);
+    if (cfg.shopSellJunk) await sellJunk(); // antes das compras: o ouro da venda já entra na conta
     const tab = findButton((t) => /^consumiveis\b/.test(t));
     if (tab) { click(tab); await sleep(400); }
     const all = findButton((t) => /^todos\b/.test(t));
     if (all) { click(all); await sleep(400); }
     const done = [];
-    for (const [name, target] of [['Poção Grande', cfg.shopHp], ['Poção de Mana Grande', cfg.shopMp], ['Reviver Grande', cfg.shopRevive]]) {
-      if (!(target > 0)) continue;
-      const n = await buyItem(name, target);
+    for (const [names, key] of SHOP_SIZES) {
+      if (!(cfg[key] > 0)) continue;
+      const name = names.find((n) => { const c = shopCard(n); return c && !c.classList.contains('slShopOff'); });
+      if (!name) continue;
+      const n = await buyItem(name, cfg[key]);
       if (n) done.push(`${n} ${name}`);
     }
-    // As essências ficam na aba própria da loja; a compra rápida vai de 50 em 50 (máx. 2.000 por visita).
+    // As essências ficam na aba própria da loja.
     const essTab = document.querySelector('.slTab[data-tab="essences"]');
     if (cfg.shopEssence > 0 && essTab) {
       click(essTab);
       await sleep(400);
-      const n = await buyItem('Essência de Extração', cfg.shopEssence);
+      const target = essenceTarget(cfg.shopEssence, cfg.lastKph, cfg.shopEveryHours);
+      if (target === ESSENCE_MAX) log(`Loja: ${cfg.shopEveryHours} h de caça pedem mais de ${ESSENCE_MAX} essências; diminua "A cada (horas)".`);
+      const n = await buyItem('Essência de Extração', target);
       if (n) done.push(`${n} Essência de Extração`);
     }
     log(done.length ? `Loja do Brok: comprei ${done.join(', ')}.` : 'Loja do Brok: estoque já estava completo.');
@@ -1582,11 +1664,12 @@
         <label>Montar melhor time sozinho<input type="checkbox" data-k="autoTeam"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="teamEveryMin"></label>
         <label>Equipar melhores nas sombras<input type="checkbox" data-k="shadowGear"></label>
-        <label>Vaga 6 para treinar sombra<input type="checkbox" data-k="shadowTrainee"></label>
+        <label>Vagas para treinar sombra<input type="checkbox" data-k="shadowTrainee"></label>
+        <label>Quantas (1 = vaga 6, 2 = vagas 5 e 6)<input type="number" min="1" max="2" data-k="traineeSlots"></label>
         <h4>Recompensas</h4>
         <label>Resgatar Missões, Diária e Correio<input type="checkbox" data-k="autoRewards"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="rewardsEveryMin"></label>
-        <label>Expedições (só Armazém)<input type="checkbox" data-k="autoExped"></label>
+        <label>Expedições (só fora do time)<input type="checkbox" data-k="autoExped"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="expedEveryMin"></label>
         <h4>Caçada</h4>
         <label>Ir para a área recomendada<input type="checkbox" data-k="autoHunt"></label>
@@ -1599,10 +1682,11 @@
         <h4>Loja do Brok</h4>
         <label>Comprar poções, Revivers e essências<input type="checkbox" data-k="autoShop"></label>
         <label>A cada (horas)<input type="number" min="1" max="48" data-k="shopEveryHours"></label>
-        <label>Poção Grande (manter)<input type="number" min="0" max="5000" data-k="shopHp"></label>
-        <label>Mana Grande (manter)<input type="number" min="0" max="5000" data-k="shopMp"></label>
-        <label>Reviver Grande (manter)<input type="number" min="0" max="500" data-k="shopRevive"></label>
-        <label>Essência de Extração (manter)<input type="number" min="0" max="2000" data-k="shopEssence"></label>
+        <label>Poção de vida (manter)<input type="number" min="0" max="10000" data-k="shopHp"></label>
+        <label>Poção de mana (manter)<input type="number" min="0" max="10000" data-k="shopMp"></label>
+        <label>Reviver (manter)<input type="number" min="0" max="999" data-k="shopRevive"></label>
+        <label>Essência (mínimo)<input type="number" min="0" max="9999" data-k="shopEssence"></label>
+        <label>Vender peças Comum/Incomum<input type="checkbox" data-k="shopSellJunk"></label>
         <label>Reserva de ouro<input type="number" min="0" max="99999999" data-k="shopGoldReserve"></label>
         <div class="row"><button data-act="now">Rodar agora</button><button data-act="shop">Comprar agora</button><button data-act="clear">Limpar log</button></div>
         <pre></pre>

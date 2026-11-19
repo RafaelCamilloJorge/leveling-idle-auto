@@ -9,13 +9,13 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 | Equipamento | Inventário → **Equipar melhores** (critério escolhido) | A cada 10 min |
 | Encantar | Forja → Encantamento, filtro **Só vestidas** + **Só as que ainda sobem** → **Encantar para +N**, só quando a tentativa é **Garantido** (100%, até +5). Para quando acaba a pedra ou o ouro | A cada 30 min |
 | Imbuir (**desligado** por padrão) | Forja → Imbuir, peças vestidas: nos slots **vazios ou expirados** aplica o **nível I** do primeiro imbuimento da lista (padrão: Frenesi, Força, Execução, Golpe Crítico, Ruptura) que tiver material. Nunca usa o Cristal, nunca troca um imbuimento ativo e para na reserva de ouro da loja | A cada 60 min |
-| Exército | Exército → **Montar melhor time**, **Equipar melhores** em cada sombra do time e vaga 6 de treino | A cada 30 min |
+| Exército | Exército → **Montar melhor time**, **Equipar melhores** em cada sombra do time e vagas 5 e 6 de treino (sombras de rank melhor sobem de nível de graça, sem ouro) | A cada 30 min |
 | Área de caça | Caçadas → **Entrar no portal** da melhor área permitida (sozinho: a **★ Recomendada** ou a logo abaixo, a que render mais EXP/h; em party: veja abaixo) | A cada 20 min e ao subir de nível |
-| Expedições | Exército → Expedições → **Coletar tudo** e manda Sombras **só do Armazém** (nunca do time) no destino mais alto que cada uma aguenta | A cada 20 min |
+| Expedições | Exército → Expedições → **Coletar tudo** e manda só as Sombras **de fora do time** (nunca as do time) no destino mais alto que cada uma aguenta | A cada 20 min |
 | Missões | Missões → **Resgatar** (Jornada do Caçador e objetivos diários prontos) | A cada 15 min |
 | Recompensa Diária | Recompensas Diárias → **Resgatar** | A cada 15 min |
 | Correio | Correio → **Reivindicar tudo** (e de novo ~1 min depois de resgatar a Diária) | A cada 15 min |
-| Loja do Brok | Sai da caçada, anda até o **Brok** em Seul (setas + **E**), completa **Poção Grande**, **Poção de Mana Grande**, **Reviver Grande** e **Essência de Extração** até a meta, respeitando uma reserva de ouro, e volta para a caçada | A cada 6 h, ou logo que a conta estiver na cidade (ex.: depois de morrer) |
+| Loja do Brok | Sai da caçada, anda até o **Brok** em Seul (setas + **E**), vende as peças **Comum/Incomum** que sobram (opcional), completa poção de vida, poção de mana, Reviver (o maior tamanho liberado no nível) e **Essência de Extração** até a meta numa compra só por item, respeitando uma reserva de ouro, e volta para a caçada | A cada 6 h, ou logo que a conta estiver na cidade (ex.: depois de morrer) |
 
 > **Em party** a área precisa servir para todo mundo: o limite é o **menor nível** entre você e
 > os membros (lido no quadro da party). A extensão escolhe a maior área da trilha que começa até
@@ -29,8 +29,12 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 
 > **Loja do Brok:** a loja só abre falando com ele na cidade. O caçador sempre aparece no mesmo
 > ponto ao sair da caçada (na escada, debaixo do portal); a extensão anda ~2 s para baixo e ~1,5 s
-> para a esquerda, aperta **E** e, se a loja não abrir, procura em volta. Metas padrão: 300 Poções
-> Grandes, 100 de Mana Grande, 20 Revivers Grandes, sem deixar o ouro cair abaixo de 20.000. Tem um
+> para a esquerda, aperta **E** e, se a loja não abrir, procura em volta. Metas padrão: 300 poções
+> de vida, 100 de mana, 20 Revivers, sem deixar o ouro cair abaixo de 20.000 (máximo do jogo: 10.000
+> poções e 999 Revivers). A meta de essência é o maior entre o mínimo do painel e os abates/h medidos
+> × horas até a próxima ida (+20%), até 9.999. **Vender peças Comum/Incomum** (desligado por padrão)
+> marca na tela "Vender itens" só Armas, Armadura e Acessórios dessas raridades; o jogo já esconde
+> as peças vestidas e as das sombras, e a venda é cancelada se aparecer peça Épica ou melhor. Tem um
 > botão **Comprar agora** no painel. Se o mapa de Seul mudar, a rota pode parar de achar o Brok
 > (o log avisa "não achei o Brok").
 
@@ -117,6 +121,13 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
 
 ## Histórico
 
+- **1.15.1** – Atualização do jogo de 19/11 (uma sombra por espécie): o time virou um quadro (vaga 1 em campo,
+  2–6 da sua sombra), a qualidade saiu e o "Armazém" das expedições virou "Fora do time". A vaga de treino
+  conta só rank, Desperta (+50%) e Monarca (+5%) e agora usa as vagas 5 e 6 (opção "Quantas"); sem sombra
+  melhor, devolve a mesma sombra à vaga.
+- **1.15.0** – Loja do Brok: compra digitando a quantidade (uma compra por item, em vez de 50 em 50), escolhe
+  o maior tamanho de poção/Reviver liberado no nível, a meta de essência acompanha os abates/h e, opcional,
+  vende as peças Comum/Incomum da mochila antes das compras.
 - **1.14.0** – Imbuimento automático (desligado por padrão): nível I nos slots vazios ou expirados das peças
   vestidas, pela ordem do painel, sem Cristal e respeitando a reserva de ouro.
 - **1.13.0** – Log: uma linha por hora com EXP/h, abates/h e ouro/h da caçada e a essência que dá para as

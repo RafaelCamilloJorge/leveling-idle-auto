@@ -8,6 +8,7 @@ Extensão para o **IdleDeck** (também funciona como script do Tampermonkey) que
 | Talentos | Árvore de Talentos → aprende 1 nível por vez (duplo clique) seguindo o plano da build | A cada 20 min, quando há pontos |
 | Equipamento | Inventário → **Equipar melhores** (critério escolhido) | A cada 10 min |
 | Encantar | Forja → Encantamento, filtro **Só vestidas** + **Só as que ainda sobem** → **Encantar para +N**, só quando a tentativa é **Garantido** (100%, até +5). Para quando acaba a pedra ou o ouro | A cada 30 min |
+| Imbuir (**desligado** por padrão) | Forja → Imbuir, peças vestidas: nos slots **vazios ou expirados** aplica o **nível I** do primeiro imbuimento da lista (padrão: Frenesi, Força, Execução, Golpe Crítico, Ruptura) que tiver material. Nunca usa o Cristal, nunca troca um imbuimento ativo e para na reserva de ouro da loja | A cada 60 min |
 | Exército | Exército → **Montar melhor time**, **Equipar melhores** em cada sombra do time e vaga 6 de treino | A cada 30 min |
 | Área de caça | Caçadas → **Entrar no portal** da melhor área permitida (sozinho: a **★ Recomendada** ou a logo abaixo, a que render mais EXP/h; em party: veja abaixo) | A cada 20 min e ao subir de nível |
 | Expedições | Exército → Expedições → **Coletar tudo** e manda Sombras **só do Armazém** (nunca do time) no destino mais alto que cada uma aguenta | A cada 20 min |
@@ -116,6 +117,10 @@ no IdleDeck ao mesmo tempo: o jogo derruba uma das sessões.
 
 ## Histórico
 
+- **1.14.0** – Imbuimento automático (desligado por padrão): nível I nos slots vazios ou expirados das peças
+  vestidas, pela ordem do painel, sem Cristal e respeitando a reserva de ouro.
+- **1.13.0** – Log: uma linha por hora com EXP/h, abates/h e ouro/h da caçada e a essência que dá para as
+  horas entre idas ao Brok (lê a faixa do app desktop ou a dica do botão do Auto-Helper).
 - **1.12.0** – Loja do Brok: também completa a **Essência de Extração** (aba Essências, meta padrão 1.000, máx.
   2.000 por visita), para o Auto-ARISE não parar por falta de essência.
 - **1.11.1** – EXP/h: ao voltar da cidade (Brok, morte) segue a medição de onde parou, em vez de voltar para a

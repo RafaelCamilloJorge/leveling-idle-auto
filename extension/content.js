@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.12.0
+// @version      1.14.0
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -73,6 +73,9 @@
     expedEveryMin: 20,
     autoEnchant: true,      // encanta as peças vestidas só enquanto for "Garantido" (até +5)
     enchantEveryMin: 30,
+    autoImbue: false,       // imbuimento nível I nas peças vestidas; desligado até compensar o ouro e o material
+    imbueEveryMin: 60,
+    imbueOrder: 'Frenesi, Força, Execução, Golpe Crítico, Ruptura', // o primeiro que tiver material
     deathGuard: true,       // depois de mortes seguidas, caça uma área abaixo por um tempo
     deathLimit: 2,          // mortes...
     deathWindowMin: 15,     // ...dentro desta janela
@@ -393,7 +396,7 @@
   const forgeKey = (b) => b.getAttribute('aria-label') || b.title || norm(b.innerText);
 
   // Filtros da lista: "Mostrar: Só vestidas" (select nativo) + chip "Só as que ainda sobem".
-  function setForgeFilters() {
+  function setForgeFilters(eligible = true) {
     let changed = false;
     for (const sel of document.querySelectorAll('.slForgeFilterPanel select')) {
       const opt = [...sel.options].find((o) => norm(o.textContent) === 'so vestidas');
@@ -404,7 +407,7 @@
       }
     }
     const chip = document.querySelector('.slForgeEligible');
-    if (chip && chip.getAttribute('aria-pressed') !== 'true') { chip.click(); changed = true; }
+    if (eligible && chip && chip.getAttribute('aria-pressed') !== 'true') { chip.click(); changed = true; }
     return changed;
   }
 
@@ -457,6 +460,98 @@
       await waitFor(forgeIdle, 4000);
     }
     if (done.length) log(`Forja: encantei ${done.length}x (${done.join(', ')})` + (stop ? ` — parei: ${stop}.` : '.'));
+    await closePanels();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 2b) Forja → Imbuir: nos slots vazios ou expirados das peças VESTIDAS, aplica o
+  //     nível I do primeiro imbuimento da lista que tiver material. Nunca usa o
+  //     cristal, nunca troca um imbuimento ativo (o jogo destrói o antigo) e para
+  //     se o ouro cair abaixo da reserva da loja.
+  //     shortcut: não olha o limite de soma de cada efeito; no nível I ele fica longe. Rever se usar II/III.
+  // ---------------------------------------------------------------------------
+  const imbModal = () => visQ('.slImbModal:not(.slBatModal)'); // .slBatModal é o "encantar em lote"
+  const imbSlots = () => [...((visQ('.slForgeStage') || document.createElement('div')).querySelectorAll('.slImbSlot'))];
+  function imbGold(m) {
+    // Linhas "tem / precisa": materiais e, por último, o ouro. Sem leitura, devolve 0/0 (cai na reserva e para).
+    const last = [...m.querySelectorAll('.slImbMats .slImbMatNum:not(.slImbMatHead)')].filter((e) => e.innerText.includes('/')).pop();
+    const [have, need] = last ? last.innerText.split('/').map(num) : [0, 0];
+    return { have, need };
+  }
+
+  // Devolve o nome aplicado, 'ouro' (parar tudo) ou '' (nenhum da lista tem material).
+  async function pickImbue(m, order) {
+    for (const want of order) {
+      const opt = [...m.querySelectorAll('.slImbTypes button.slImbOpt')]
+        .find((b) => !b.disabled && norm(b.querySelector('b')?.innerText) === want);
+      if (!opt) continue;
+      const name = opt.querySelector('b').innerText.trim();
+      click(opt);
+      const tier = await waitFor(() => m.querySelector('.slImbTiers button.slImbTier'), 2000);
+      if (!tier) continue;
+      click(tier); // o primeiro é o nível I
+      if (!(await waitFor(() => m.querySelector('button.fgxModalGo'), 2000))) continue;
+      const crystal = m.querySelector('input.slImbSwitchIn');
+      if (crystal && crystal.checked) { click(crystal); await sleep(300); }
+      const gold = imbGold(m);
+      if (gold.have - gold.need < cfg.shopGoldReserve) return 'ouro';
+      const go = m.querySelector('button.fgxModalGo');
+      if (go && !go.disabled) { click(go); return name; }
+      // Botão travado = falta material deste: volta ao passo 1 e tenta o próximo da lista.
+      const back = m.querySelector('.slImbSteps button.slImbStep');
+      if (!back) break;
+      click(back);
+      if (!(await waitFor(() => m.querySelector('.slImbTypes'), 2000))) break;
+    }
+    return '';
+  }
+
+  async function doImbue() {
+    const order = String(cfg.imbueOrder || '').split(',').map(norm).filter(Boolean);
+    if (!order.length) return;
+    if (!(await openForge())) { log('Não consegui abrir a Forja.'); await closePanels(); return; }
+    await sleep(500);
+    const tab = document.querySelector('button.slForgeTab[data-tab="imbue"]');
+    if (!tab) { await closePanels(); return; }
+    if (!tab.classList.contains('slForgeTabOn')) { click(tab); await sleep(700); }
+    if (setForgeFilters(false)) await sleep(900); // "Só as que ainda sobem" é do Encantar
+    await waitFor(forgeIdle, 5000);
+    await sleep(400);
+
+    const done = [];
+    let stop = '';
+    for (const key of forgeItems().map(forgeKey)) { // as vestidas cabem na 1ª página
+      const item = forgeItems().find((b) => forgeKey(b) === key);
+      if (!item) continue;
+      if (item.getAttribute('aria-pressed') !== 'true') { click(item); await sleep(800); }
+      for (let i = 0; i < imbSlots().length && !stop; i++) {
+        const row = imbSlots()[i];
+        const expired = row.classList.contains('slImbSlotExpired');
+        if (!expired && !row.classList.contains('slImbSlotEmpty')) continue; // ativo: não mexe
+        // Expirado: "Escolher outro" (o "Renovar" repete o nível antigo, que pode ser II/III).
+        const open = [...row.querySelectorAll('.slImbActs button')][expired ? 1 : 0];
+        if (!open || open.disabled) continue;
+        click(open);
+        const m = await waitFor(imbModal, 3000);
+        if (!m) continue;
+        const name = await pickImbue(m, order);
+        if (!name || name === 'ouro') {
+          const x = m.querySelector('button.slFechar');
+          if (x) click(x);
+          await sleep(400);
+          stop = name === 'ouro' ? 'ouro na reserva' : 'sem material da lista';
+          break;
+        }
+        await waitFor(() => !imbModal(), 6000);
+        await sleep(800);
+        const after = imbSlots()[i];
+        const ok = after && !after.classList.contains('slImbSlotEmpty') && !after.classList.contains('slImbSlotExpired');
+        done.push(`${name} I em ${key.split(' · ')[0]}${ok ? '' : ' (falhou)'}`);
+      }
+      if (stop) break;
+    }
+    if (done.length) log(`Imbuimento: ${done.join(', ')}` + (stop ? ` — parei: ${stop}.` : '.'));
+    else if (stop) log(`Imbuimento: nada feito (${stop}).`);
     await closePanels();
   }
 
@@ -991,6 +1086,33 @@
     && parseCompact('950') === 950 && parseCompact('—') === null && parseClock('01:02:03') === 3723 && parseClock('--:--:--') === null,
   '[leveling-idle-auto] leitor do EXP/h quebrou');
 
+  // Outras médias da caçada (Ouro/h, Abates/h): linha <dt> da faixa do app desktop ou a dica
+  // (aria-label "… · Ouro/h 30,5 mil · XP/h 1,2 mi · Abates/h 850 · …") do botão do Auto-Helper.
+  const statFromLabel = (text, label) => {
+    const part = String(text || '').split('·').map((s) => s.trim()).find((s) => norm(s).startsWith(label + ' '));
+    return part ? parseCompact(part.slice(label.length)) : null;
+  };
+  console.assert(statFromLabel('Auto-Helper · Ouro +1.234 · Ouro/h 30,5 mil · XP/h 1,2 mi · Abates/h 850', 'abates/h') === 850
+    && statFromLabel('Ouro +1.234 · Ouro/h 30,5 mil', 'ouro/h') === 30500, '[leveling-idle-auto] leitor dos abates/h quebrou');
+  function huntStat(label) {
+    const row = [...document.querySelectorAll('section.slStripAuto .slStripAutoStats > div')]
+      .find((d) => norm(d.querySelector('dt')?.textContent).replace(/\s/g, '') === label);
+    if (row) return parseCompact(row.querySelector('dd')?.textContent);
+    for (const el of document.querySelectorAll('[aria-label*="/h"]')) {
+      const v = statFromLabel(el.getAttribute('aria-label'), label);
+      if (v != null) return v;
+    }
+    return null;
+  }
+  // Uma linha por hora com o ritmo da caçada (média desde que ela começou), para acertar a meta de essência.
+  function logStats() {
+    const r = huntRate(), kph = huntStat('abates/h'), gph = huntStat('ouro/h');
+    if (!r || kph == null || r.secs < 600) return false;
+    log(`Caçada: ${fmtCompact(r.xph)} EXP/h · ${fmtCompact(kph)} abates/h${gph != null ? ` · ${fmtCompact(gph)} ouro/h` : ''}`
+      + ` (essência para ${cfg.shopEveryHours} h: ~${fmtCompact(kph * cfg.shopEveryHours)}).`);
+    return true;
+  }
+
   // Na grade, ao escolher uma área a ficha dela toma o lugar da trilha (e o painel
   // reabre nela). O ✕ da ficha (button.slAtlasClose, "Voltar") traz a trilha de volta.
   async function showTrail() {
@@ -1220,6 +1342,8 @@
   let lastMail = 0;
   let lastExped = 0;
   let lastEnchant = 0;
+  let lastStats = 0;
+  let lastImbue = 0;
   let mailSoon = 0;
 
   function readLevel() {
@@ -1273,6 +1397,10 @@
         lastEnchant = now;
         await doEnchant();
       }
+      if (cfg.autoImbue && (force || now - lastImbue > cfg.imbueEveryMin * 60000)) {
+        lastImbue = now;
+        await doImbue();
+      }
       // Expedições antes das Missões: enviar uma conta para o objetivo diário "Envie 1 expedição".
       if (cfg.autoExped && (force || now - lastExped > cfg.expedEveryMin * 60000)) {
         lastExped = now;
@@ -1298,6 +1426,7 @@
         lastHunt = now;
         await doHunt();
       }
+      if (now - lastStats > 3600000 && inHunt() && logStats()) lastStats = now;
     } catch (e) {
       log('Erro: ' + (e && e.message ? e.message : e));
       await closePanels().catch(() => {});
@@ -1420,7 +1549,7 @@
         #lvlAutoRoot select[size]{display:none;position:absolute;right:0;top:100%;z-index:1;width:180px;max-width:none;box-shadow:0 4px 12px #000c}
         #lvlAutoRoot select[size].show{display:block}
         #lvlAutoRoot option:checked{background:#7c4dff linear-gradient(#7c4dff,#7c4dff);color:#fff}
-        #lvlAutoRoot select,#lvlAutoRoot input[type=number]{height:auto;background:#221c33;color:#eee;border:1px solid #4b3a8a;border-radius:4px;padding:2px 4px;max-width:150px}
+        #lvlAutoRoot select,#lvlAutoRoot input[type=number],#lvlAutoRoot input[type=text]{height:auto;background:#221c33;color:#eee;border:1px solid #4b3a8a;border-radius:4px;padding:2px 4px;max-width:150px}
         #lvlAutoRoot input[type=number]{width:56px}
         #lvlAutoRoot h4{margin:8px 0 2px;font-size:11px;letter-spacing:.06em;color:#b9a7ff;text-transform:uppercase}
         #lvlAutoRoot .row{display:flex;gap:6px;margin-top:8px}
@@ -1446,6 +1575,9 @@
         <label>A cada (min)<input type="number" min="2" max="240" data-k="equipEveryMin"></label>
         <label>Encantar vestidas (só garantido)<input type="checkbox" data-k="autoEnchant"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="enchantEveryMin"></label>
+        <label>Imbuir vestidas (nível I)<input type="checkbox" data-k="autoImbue"></label>
+        <label>A cada (min)<input type="number" min="15" max="720" data-k="imbueEveryMin"></label>
+        <label>Ordem do imbuimento<input type="text" data-k="imbueOrder"></label>
         <h4>Exército</h4>
         <label>Montar melhor time sozinho<input type="checkbox" data-k="autoTeam"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="teamEveryMin"></label>
@@ -1497,7 +1629,7 @@
         saveCfg();
         paintFab();
         setStatus(cfg.enabled ? 'ligado' : 'desligado');
-        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; lastTalents = 0; lastRewards = 0; lastMail = 0; lastExped = 0; lastEnchant = 0; tick(false); }
+        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; lastTalents = 0; lastRewards = 0; lastMail = 0; lastExped = 0; lastEnchant = 0; lastImbue = 0; tick(false); }
       });
       // não deixar as teclas do painel virarem atalho do jogo
       el.addEventListener('keydown', (e) => e.stopPropagation());

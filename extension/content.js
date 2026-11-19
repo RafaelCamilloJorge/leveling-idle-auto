@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Leveling Idle - Auto Pontos & Equipar
 // @namespace    leveling-idle-auto
-// @version      1.8.0
+// @version      1.14.0
 // @description  Distribui pontos pela build, equipa os melhores itens, monta o melhor time do Exército e vai para a área de caça recomendada, sozinho.
 // @match        https://levelingidle2d.com.br/jogar*
 // @run-at       document-idle
@@ -43,10 +43,14 @@
 
   const DEBUG = false; // true: log detalhado da troca de área
 
+  // Build usada quando o painel fica em "Build padrão da classe" (uma por classe; os nomes não se repetem).
+  const PREFERRED_BUILDS = ['Destruidor', 'Lâmina Letal', 'Rajada Arcana', 'Chuva de Flechas', 'Julgador'];
+  const isPreferred = (name) => PREFERRED_BUILDS.some((p) => norm(p) === norm(name));
+
   const DEFAULTS = {
     enabled: false,
     autoPoints: true,
-    buildName: '',          // '' = primeira build da lista da classe
+    buildName: '',          // '' = build padrão da classe (PREFERRED_BUILDS) ou a primeira da lista
     minPoints: 5,           // só distribui com pelo menos N pontos livres
     autoEquip: true,
     criterion: 1,
@@ -54,8 +58,12 @@
     pointsEveryMin: 15,     // checa pontos a cada N minutos (além de quando o nível muda)
     autoTeam: true,         // roda o "Montar melhor time" do Exército
     teamEveryMin: 30,
+    shadowGear: true,       // "Equipar melhores" em cada sombra do time
+    shadowTrainee: true,    // vaga 6 para a sombra de fora com multiplicadores melhores (para upar)
     autoHunt: true,         // vai para a área "Recomendada" pelo jogo nas Caçadas
     huntEveryMin: 20,
+    expCompare: true,       // sozinho: mede o EXP/h da recomendada e da área logo abaixo e fica na melhor
+    expSampleMin: 15,       // minutos caçando em cada área antes de medir
     autoTalents: true,      // investe os pontos de talento pelo plano da build
     talentBuild: '',        // '' = mesmo nome da build de atributos (ou a 1ª da classe)
     talentsEveryMin: 20,
@@ -65,6 +73,9 @@
     expedEveryMin: 20,
     autoEnchant: true,      // encanta as peças vestidas só enquanto for "Garantido" (até +5)
     enchantEveryMin: 30,
+    autoImbue: false,       // imbuimento nível I nas peças vestidas; desligado até compensar o ouro e o material
+    imbueEveryMin: 60,
+    imbueOrder: 'Frenesi, Força, Execução, Golpe Crítico, Ruptura', // o primeiro que tiver material
     deathGuard: true,       // depois de mortes seguidas, caça uma área abaixo por um tempo
     deathLimit: 2,          // mortes...
     deathWindowMin: 15,     // ...dentro desta janela
@@ -74,10 +85,12 @@
     shopHp: 300,            // Poção Grande
     shopMp: 100,            // Poção de Mana Grande
     shopRevive: 20,         // Reviver Grande
+    shopEssence: 1000,      // Essência de Extração (ARISE), 1 de ouro cada
     shopGoldReserve: 20000, // nunca deixa o ouro cair abaixo disto
     lastShop: 0,
     deaths: [],
     huntPauseUntil: 0,
+    expTest: null,          // medição em andamento: {rec, low, recXph, lowXph, win, at, enteredAt}
     talentPlanSeen: '',
     knownBuilds: [],
     log: [],
@@ -317,7 +330,8 @@
     if (free < Math.max(1, cfg.minPoints)) { await closePanels(); return; }
     if (!builds.length) { log('Nenhuma build encontrada no Status.'); await closePanels(); return; }
 
-    const chosen = builds.find((b) => norm(b.name) === norm(cfg.buildName)) || builds[0];
+    const chosen = builds.find((b) => norm(b.name) === norm(cfg.buildName))
+      || builds.find((b) => isPreferred(b.name)) || builds[0];
     const before = new Set(buttons().filter((b) => norm(b.innerText) === 'distribuir pela build'));
     click(chosen.button);
 
@@ -382,7 +396,7 @@
   const forgeKey = (b) => b.getAttribute('aria-label') || b.title || norm(b.innerText);
 
   // Filtros da lista: "Mostrar: Só vestidas" (select nativo) + chip "Só as que ainda sobem".
-  function setForgeFilters() {
+  function setForgeFilters(eligible = true) {
     let changed = false;
     for (const sel of document.querySelectorAll('.slForgeFilterPanel select')) {
       const opt = [...sel.options].find((o) => norm(o.textContent) === 'so vestidas');
@@ -393,7 +407,7 @@
       }
     }
     const chip = document.querySelector('.slForgeEligible');
-    if (chip && chip.getAttribute('aria-pressed') !== 'true') { chip.click(); changed = true; }
+    if (eligible && chip && chip.getAttribute('aria-pressed') !== 'true') { chip.click(); changed = true; }
     return changed;
   }
 
@@ -450,6 +464,98 @@
   }
 
   // ---------------------------------------------------------------------------
+  // 2b) Forja → Imbuir: nos slots vazios ou expirados das peças VESTIDAS, aplica o
+  //     nível I do primeiro imbuimento da lista que tiver material. Nunca usa o
+  //     cristal, nunca troca um imbuimento ativo (o jogo destrói o antigo) e para
+  //     se o ouro cair abaixo da reserva da loja.
+  //     shortcut: não olha o limite de soma de cada efeito; no nível I ele fica longe. Rever se usar II/III.
+  // ---------------------------------------------------------------------------
+  const imbModal = () => visQ('.slImbModal:not(.slBatModal)'); // .slBatModal é o "encantar em lote"
+  const imbSlots = () => [...((visQ('.slForgeStage') || document.createElement('div')).querySelectorAll('.slImbSlot'))];
+  function imbGold(m) {
+    // Linhas "tem / precisa": materiais e, por último, o ouro. Sem leitura, devolve 0/0 (cai na reserva e para).
+    const last = [...m.querySelectorAll('.slImbMats .slImbMatNum:not(.slImbMatHead)')].filter((e) => e.innerText.includes('/')).pop();
+    const [have, need] = last ? last.innerText.split('/').map(num) : [0, 0];
+    return { have, need };
+  }
+
+  // Devolve o nome aplicado, 'ouro' (parar tudo) ou '' (nenhum da lista tem material).
+  async function pickImbue(m, order) {
+    for (const want of order) {
+      const opt = [...m.querySelectorAll('.slImbTypes button.slImbOpt')]
+        .find((b) => !b.disabled && norm(b.querySelector('b')?.innerText) === want);
+      if (!opt) continue;
+      const name = opt.querySelector('b').innerText.trim();
+      click(opt);
+      const tier = await waitFor(() => m.querySelector('.slImbTiers button.slImbTier'), 2000);
+      if (!tier) continue;
+      click(tier); // o primeiro é o nível I
+      if (!(await waitFor(() => m.querySelector('button.fgxModalGo'), 2000))) continue;
+      const crystal = m.querySelector('input.slImbSwitchIn');
+      if (crystal && crystal.checked) { click(crystal); await sleep(300); }
+      const gold = imbGold(m);
+      if (gold.have - gold.need < cfg.shopGoldReserve) return 'ouro';
+      const go = m.querySelector('button.fgxModalGo');
+      if (go && !go.disabled) { click(go); return name; }
+      // Botão travado = falta material deste: volta ao passo 1 e tenta o próximo da lista.
+      const back = m.querySelector('.slImbSteps button.slImbStep');
+      if (!back) break;
+      click(back);
+      if (!(await waitFor(() => m.querySelector('.slImbTypes'), 2000))) break;
+    }
+    return '';
+  }
+
+  async function doImbue() {
+    const order = String(cfg.imbueOrder || '').split(',').map(norm).filter(Boolean);
+    if (!order.length) return;
+    if (!(await openForge())) { log('Não consegui abrir a Forja.'); await closePanels(); return; }
+    await sleep(500);
+    const tab = document.querySelector('button.slForgeTab[data-tab="imbue"]');
+    if (!tab) { await closePanels(); return; }
+    if (!tab.classList.contains('slForgeTabOn')) { click(tab); await sleep(700); }
+    if (setForgeFilters(false)) await sleep(900); // "Só as que ainda sobem" é do Encantar
+    await waitFor(forgeIdle, 5000);
+    await sleep(400);
+
+    const done = [];
+    let stop = '';
+    for (const key of forgeItems().map(forgeKey)) { // as vestidas cabem na 1ª página
+      const item = forgeItems().find((b) => forgeKey(b) === key);
+      if (!item) continue;
+      if (item.getAttribute('aria-pressed') !== 'true') { click(item); await sleep(800); }
+      for (let i = 0; i < imbSlots().length && !stop; i++) {
+        const row = imbSlots()[i];
+        const expired = row.classList.contains('slImbSlotExpired');
+        if (!expired && !row.classList.contains('slImbSlotEmpty')) continue; // ativo: não mexe
+        // Expirado: "Escolher outro" (o "Renovar" repete o nível antigo, que pode ser II/III).
+        const open = [...row.querySelectorAll('.slImbActs button')][expired ? 1 : 0];
+        if (!open || open.disabled) continue;
+        click(open);
+        const m = await waitFor(imbModal, 3000);
+        if (!m) continue;
+        const name = await pickImbue(m, order);
+        if (!name || name === 'ouro') {
+          const x = m.querySelector('button.slFechar');
+          if (x) click(x);
+          await sleep(400);
+          stop = name === 'ouro' ? 'ouro na reserva' : 'sem material da lista';
+          break;
+        }
+        await waitFor(() => !imbModal(), 6000);
+        await sleep(800);
+        const after = imbSlots()[i];
+        const ok = after && !after.classList.contains('slImbSlotEmpty') && !after.classList.contains('slImbSlotExpired');
+        done.push(`${name} I em ${key.split(' · ')[0]}${ok ? '' : ' (falhou)'}`);
+      }
+      if (stop) break;
+    }
+    if (done.length) log(`Imbuimento: ${done.join(', ')}` + (stop ? ` — parei: ${stop}.` : '.'));
+    else if (stop) log(`Imbuimento: nada feito (${stop}).`);
+    await closePanels();
+  }
+
+  // ---------------------------------------------------------------------------
   // 3) Exército: "Montar melhor time"
   // ---------------------------------------------------------------------------
   async function doTeam() {
@@ -462,11 +568,78 @@
     }
     const best = armyBestBtn();
     if (!best) { log('Botão "Montar melhor time" não apareceu.'); await closePanels(); return; }
-    if (best.disabled) { log('Time já é o melhor.'); await closePanels(); return; }
-    click(best);
-    log('Montei o melhor time do Exército.');
-    await sleep(1200);
+    if (best.disabled) log('Time já é o melhor.');
+    else { click(best); log('Montei o melhor time do Exército.'); await sleep(1200); }
+    if (cfg.shadowTrainee) await trainSlot();
+    if (cfg.shadowGear) await gearTeam();
     await closePanels();
+  }
+
+  // Cards do time (aba Time): .slShTCard com o número da vaga em .slShTCardSlot; vaga vazia = .slShTCardEmpty.
+  const teamCard = (slot) => [...document.querySelectorAll('.slShTeamGrid .slShTCard')]
+    .find((c) => norm(c.querySelector('.slShTCardSlot')?.textContent) === String(slot));
+  const teamSideBtn = (label) => waitFor(() => [...document.querySelectorAll('.slShTeamSide button')]
+    .find((b) => visible(b) && norm(b.innerText) === label), 2000);
+
+  // Multiplicadores fixos da sombra que aparecem no card (wiki: rank, Desperta, Potencial pela
+  // qualidade, especialização Monarca). O nível não entra: ele sobe sozinho no time.
+  // shortcut: a origem do corpo (×1 a ×2) não aparece no card e fica de fora da conta.
+  const RANK_MULT = { normal: 1, elite: 1.25, cavaleiro: 1.6, 'cavaleiro de elite': 2, general: 2.6, marechal: 3.3, 'grande marechal': 4.2 };
+  const QUALITY_MULT = { bruta: 1, refinada: 1.1, superior: 1.25, perfeita: 1.35, absoluta: 1.45 };
+  function shadowMult(el) {
+    const t = (sel) => norm(el.querySelector(sel)?.textContent).replace(/[\d.,]/g, '').trim();
+    return (RANK_MULT[t('.slShRank')] || 1) * (QUALITY_MULT[t('.slShQ')] || 1)
+      * (el.querySelector('.slShAwake') ? 1.2 : 1) * (el.querySelector('.slShSpecRare') ? 1.05 : 1);
+  }
+
+  // Vaga de treino: o "Montar melhor time" olha só o poder de agora, então uma sombra de nível
+  // baixo com multiplicadores melhores nunca entra para upar. Troca a vaga 6 pela de fora do time
+  // com o maior multiplicador (10% acima da que sai). A lista do jogo mostra as 40 mais fortes.
+  async function trainSlot() {
+    const last = teamCard(6);
+    if (!last || last.classList.contains('slShTCardEmpty')) return; // time incompleto: o "Montar melhor time" resolve
+    const outMult = shadowMult(last);
+    click(last);
+    const rm = await teamSideBtn('tirar do time');
+    if (!rm) return;
+    click(rm);
+    const empty = await waitFor(() => (teamCard(6)?.classList.contains('slShTCardEmpty') ? teamCard(6) : null), 3000);
+    if (!empty) return;
+    click(empty);
+    await waitFor(() => document.querySelector('.slShSwap .slShSwapCard'), 4000);
+    const pick = [...document.querySelectorAll('.slShSwap .slShSwapCard')]
+      .map((el) => ({ el, mult: shadowMult(el), power: num(el.querySelector('.slShPower')?.textContent) }))
+      .filter((c) => c.mult >= outMult * 1.1)
+      .sort((a, b) => b.mult - a.mult || b.power - a.power)[0];
+    if (pick) { // a lista do jogo já esconde as sombras fora do seu comando
+      const name = (pick.el.querySelector('.slShSwapName')?.textContent || 'sombra').trim();
+      click(pick.el);
+      await waitFor(() => !teamCard(6)?.classList.contains('slShTCardEmpty'), 3000);
+      log(`Sombras: ${name} entrou na vaga 6 para treinar (×${pick.mult.toFixed(2)} contra ×${outMult.toFixed(2)}).`);
+      return;
+    }
+    const cancel = [...document.querySelectorAll('.slShSwap button')].find((b) => visible(b) && norm(b.innerText) === 'cancelar');
+    if (cancel) { click(cancel); await sleep(400); }
+    // Sem sombra melhor: o "Montar melhor time" devolve a vaga 6.
+    const best = await waitFor(() => { const b = armyBestBtn(); return b && !b.disabled ? b : null; }, 2000);
+    if (best) { click(best); await sleep(1200); }
+  }
+
+  // "Equipar melhores" de cada sombra do time (só funciona com a sombra no time).
+  async function gearTeam() {
+    let done = 0;
+    for (let slot = 1; slot <= 6; slot++) {
+      const card = teamCard(slot);
+      if (!card || card.classList.contains('slShTCardEmpty')) continue;
+      click(card);
+      const btn = await waitFor(() => [...document.querySelectorAll('.slShTeamSide section.slShEquip button')]
+        .find((b) => visible(b) && norm(b.innerText) === 'equipar melhores'), 2000);
+      if (!btn || btn.disabled) continue;
+      click(btn);
+      done++;
+      await sleep(jitter(800));
+    }
+    if (done) log(`Sombras: rodei "Equipar melhores" em ${done} sombra(s) do time.`);
   }
 
   // ---------------------------------------------------------------------------
@@ -686,7 +859,7 @@
     const list = PLANS && PLANS[cls];
     if (!list || !list.length) return null;
     const want = cfg.talentBuild || cfg.buildName;
-    return list.find((p) => norm(p.build) === norm(want)) || list[0];
+    return list.find((p) => norm(p.build) === norm(want)) || list.find((p) => isPreferred(p.build)) || list[0];
   }
 
   async function doTalents() {
@@ -748,6 +921,14 @@
     const party = partyLevels();
     const own0 = ownLevel();
 
+    // Em party só o líder escolhe a área (os outros vão junto). Quem não é líder só volta para
+    // a caçada do grupo: o jogo mostra "Ir para a caçada do grupo" quando você está fora dela.
+    if (party.length && partyLeaderIsOther()) {
+      const go = [...document.querySelectorAll('button.slPdmGo')].find(visible);
+      if (go) { await clickConfirm(go); log('Party: voltei para a caçada do grupo.'); }
+      return;
+    }
+
     // Abre as Caçadas na aba "Caçadas" e espera a trilha (ou o "Recomendada") aparecer.
     const openList = async () => {
       if (!(await openHunts())) return false;
@@ -763,14 +944,32 @@
     // Trava de morte ativa: usa a trilha com o limite 5 níveis abaixo (uma área a menos).
     const guardOn = cfg.deathGuard && Date.now() < (cfg.huntPauseUntil || 0);
 
+    // Escolhe uma área da trilha, reabrindo a lista se a ficha de outra área tomou o lugar dela.
+    const selectNode = async (w) => {
+      await showTrail();
+      let n = huntAreaNodes().find((x) => x.start === w.start && x.end === w.end);
+      if (!n) {
+        await closePanels();
+        if (!(await openList())) return null;
+        n = huntAreaNodes().find((x) => x.start === w.start && x.end === w.end);
+        if (!n) return null;
+      }
+      click(n.el);
+      await sleep(800);
+      return selectedAreaState();
+    };
+
     if (!party.length && !guardOn) {
-      // Sozinho: segue a "Recomendada" do jogo.
+      // Sozinho: segue a "Recomendada" do jogo (ou a área logo abaixo, se ela render mais EXP/h).
+      const nodes = huntAreaNodes(); // lê antes de clicar: na grade a ficha toma o lugar da trilha
       const rec = huntRecBtn();
       if (!rec) { log('Botão "Recomendada" não apareceu.'); await closePanels(); return; }
       click(rec);
       await sleep(900);
       const st = selectedAreaState();
       if (DEBUG) log(`[caçada] sem party; recomendada: ${st}`);
+      const R = nodes.find((n) => n.rec) || (st === 'current' ? nodes.find((n) => n.state === 'live') : null); // ★ só aparece fora da atual
+      if (cfg.expCompare && R && (await compareLower(nodes, R, selectNode))) return;
       if (st === 'enter') { await enterSelectedArea('recomendada'); return; }
       if (st === 'precision') log('Área recomendada pede mais Precisão; fiquei na atual.');
       await closePanels();
@@ -789,21 +988,12 @@
     const wanted = nodes.filter((n) => n.start <= cap && n.state !== 'locked').sort((a, b) => b.start - a.start);
     if (DEBUG) log(`[caçada] party ${party.join(',')}; eu ${own}; limite ${cap}; atual ${live ? `${live.start}-${live.end}` : '?'}; opções ${wanted.map((n) => `${n.start}-${n.end}`).join(' ') || 'nenhuma'}`);
     if (!nodes.length) { log('Não achei a trilha de áreas nas Caçadas.'); await closePanels(); return; }
+    // Líder: compara a melhor área da party com a logo abaixo (o EXP/h do líder sobe e desce junto com o do grupo).
+    if (cfg.expCompare && !guardOn && wanted[0] && (await compareLower(nodes, wanted[0], selectNode))) return;
 
     for (const w of wanted) {
       if (w.state === 'live') { await closePanels(); return; } // a melhor área possível já é a atual
-      // Reabre a lista se a ficha de outra área tomou o lugar da trilha.
-      await showTrail();
-      let n = huntAreaNodes().find((x) => x.start === w.start && x.end === w.end);
-      if (!n) {
-        await closePanels();
-        if (!(await openList())) break;
-        n = huntAreaNodes().find((x) => x.start === w.start && x.end === w.end);
-        if (!n) continue;
-      }
-      click(n.el);
-      await sleep(800);
-      const st = selectedAreaState();
+      const st = await selectNode(w);
       if (DEBUG) log(`[caçada] ${w.start}-${w.end}: ${st}`);
       if (st === 'current') { await closePanels(); return; }
       if (st === 'enter') {
@@ -812,10 +1002,115 @@
           : `menor nível da party: ${cap}`);
         return;
       }
-      // 'locked' ou 'precision': tenta a próxima área abaixo.
+      // null, 'locked' ou 'precision': tenta a próxima área abaixo.
     }
     log(`Nenhuma área até o Nv ${cap}${guardOn ? ' (trava de morte)' : ' (menor da party)'} está aberta para mim.`);
     await closePanels();
+  }
+
+  // EXP/h: mede a área R (a Recomendada ou, em party, a melhor que abre para todos) e a logo
+  // abaixo (expSampleMin cada, uma rodada por vez) e fica na que render mais. Mede de novo
+  // quando R muda ou a cada 4 h. Devolve true quando já resolveu a rodada; false = fluxo normal.
+  const EXP_RETEST_MS = 4 * 3600000;
+  const EXP_MARGIN = 0.1; // a de baixo precisa render 10% a mais: o HUD arredonda o EXP/h
+  async function compareLower(nodes, R, selectNode) {
+    const key = (n) => `${n.start}-${n.end}`;
+    const live = nodes.find((n) => n.state === 'live');
+    const L = nodes.filter((n) => n.start < R.start && n.state !== 'locked').sort((a, b) => b.start - a.start)[0];
+    if (!L) return false;
+    let t = cfg.expTest;
+    if (!t || t.rec !== key(R) || t.low !== key(L) || Date.now() - t.at > EXP_RETEST_MS) {
+      t = cfg.expTest = { rec: key(R), low: key(L), at: Date.now(), enteredAt: 0 };
+    }
+    const here = live && key(live);
+    const r = huntRate();
+    if (!t.win && here && !r && !t.noRate) { t.noRate = true; log('EXP/h: não achei o EXP/h do Auto-Helper no HUD; fico na área de cima.'); }
+    if (!t.win && r && r.secs >= cfg.expSampleMin * 60) {
+      // O relógio tem que ter começado depois da nossa última troca de área.
+      if (t.enteredAt && r.secs > (Date.now() - t.enteredAt) / 1000 + 120) {
+        t.win = t.rec;
+        log('EXP/h: o relógio do Auto-Helper não zerou ao trocar de área; fico na área de cima.');
+      } else if (here === t.rec && t.recXph == null) t.recXph = r.xph;
+      else if (here === t.low && t.lowXph == null) t.lowXph = r.xph;
+      if (t.recXph != null && t.lowXph != null) {
+        t.win = t.lowXph > t.recXph * (1 + EXP_MARGIN) ? t.low : t.rec;
+        log(`EXP/h: ${t.rec} = ${fmtCompact(t.recXph)}, ${t.low} = ${fmtCompact(t.lowXph)}. Fico na ${t.win}.`);
+      }
+    }
+    saveCfg();
+    // Na cidade (Brok, morte) não há EXP/h: segue a medição de onde parou. Só sem HUD *dentro* da caçada fica em R.
+    const goal = t.win || (t.recXph == null || (here && !r) ? t.rec : t.low);
+    if (here === goal) { await closePanels(); return true; }
+    const toR = goal === t.rec;
+    if ((await selectNode(toR ? R : L)) !== 'enter') {
+      if (toR) return false; // R pede Precisão ou está selada: segue o fluxo normal
+      t.win = t.rec; saveCfg(); // a de baixo não abre para mim: volta para R já
+      await closePanels(); lastHunt = 0;
+      return true;
+    }
+    t.enteredAt = Date.now(); saveCfg();
+    await enterSelectedArea(`${toR ? 'área melhor' : 'área de baixo'}, ${t.win ? 'mais EXP/h' : 'medindo EXP/h'}`);
+    return true;
+  }
+
+  // EXP/h e tempo da caçada atual no HUD do Auto-Helper (navegador: .slHudAh; app desktop:
+  // .slStripAuto). O jogo mostra o número compacto ("345,2 mil", "1,2 mi") e o relógio hh:mm:ss.
+  function huntRate() {
+    const strip = document.querySelector('section.slStripAuto');
+    const rows = strip ? [...strip.querySelectorAll('.slStripAutoStats > div')] : [];
+    const row = rows.find((d) => /^(exp|xp) ?\/ ?h/.test(norm(d.querySelector('dt')?.textContent))) || rows[3]; // ordem fixa: ouro, ouro/h, EXP, EXP/h
+    const pairs = [
+      [document.querySelector('.slHudAhRateVal'), document.querySelector('.slHudAhTime')],
+      [row && row.querySelector('dd'), strip && strip.querySelector('.slStripAutoClock')],
+    ];
+    for (const [v, c] of pairs) {
+      const xph = v ? parseCompact(v.textContent) : null;
+      const secs = c ? parseClock(c.textContent) : null;
+      if (xph != null && secs != null) return { xph, secs };
+    }
+    return null;
+  }
+  function parseCompact(text) {
+    const m = norm(text).replace(/\s/g, '').match(/^([\d.,]+)(mil|mi|bi|tri|k|m|b|t)?$/);
+    if (!m) return null;
+    const n = m[2] ? m[1].replace(',', '.') : m[1].replace(/[.,]/g, ''); // com sufixo, o separador é decimal
+    const mult = { mil: 1e3, k: 1e3, mi: 1e6, m: 1e6, bi: 1e9, b: 1e9, tri: 1e12, t: 1e12 }[m[2]] || 1;
+    return Number.isFinite(Number(n)) ? Math.round(Number(n) * mult) : null;
+  }
+  function parseClock(text) {
+    const m = String(text || '').trim().match(/^(\d+):(\d\d):(\d\d)$/);
+    return m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) : null;
+  }
+  const fmtCompact = (n) => new Intl.NumberFormat('pt-BR', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
+  console.assert(parseCompact('345,2 mil') === 345200 && parseCompact('1,2 mi') === 1200000 && parseCompact('1.5M') === 1500000
+    && parseCompact('950') === 950 && parseCompact('—') === null && parseClock('01:02:03') === 3723 && parseClock('--:--:--') === null,
+  '[leveling-idle-auto] leitor do EXP/h quebrou');
+
+  // Outras médias da caçada (Ouro/h, Abates/h): linha <dt> da faixa do app desktop ou a dica
+  // (aria-label "… · Ouro/h 30,5 mil · XP/h 1,2 mi · Abates/h 850 · …") do botão do Auto-Helper.
+  const statFromLabel = (text, label) => {
+    const part = String(text || '').split('·').map((s) => s.trim()).find((s) => norm(s).startsWith(label + ' '));
+    return part ? parseCompact(part.slice(label.length)) : null;
+  };
+  console.assert(statFromLabel('Auto-Helper · Ouro +1.234 · Ouro/h 30,5 mil · XP/h 1,2 mi · Abates/h 850', 'abates/h') === 850
+    && statFromLabel('Ouro +1.234 · Ouro/h 30,5 mil', 'ouro/h') === 30500, '[leveling-idle-auto] leitor dos abates/h quebrou');
+  function huntStat(label) {
+    const row = [...document.querySelectorAll('section.slStripAuto .slStripAutoStats > div')]
+      .find((d) => norm(d.querySelector('dt')?.textContent).replace(/\s/g, '') === label);
+    if (row) return parseCompact(row.querySelector('dd')?.textContent);
+    for (const el of document.querySelectorAll('[aria-label*="/h"]')) {
+      const v = statFromLabel(el.getAttribute('aria-label'), label);
+      if (v != null) return v;
+    }
+    return null;
+  }
+  // Uma linha por hora com o ritmo da caçada (média desde que ela começou), para acertar a meta de essência.
+  function logStats() {
+    const r = huntRate(), kph = huntStat('abates/h'), gph = huntStat('ouro/h');
+    if (!r || kph == null || r.secs < 600) return false;
+    log(`Caçada: ${fmtCompact(r.xph)} EXP/h · ${fmtCompact(kph)} abates/h${gph != null ? ` · ${fmtCompact(gph)} ouro/h` : ''}`
+      + ` (essência para ${cfg.shopEveryHours} h: ~${fmtCompact(kph * cfg.shopEveryHours)}).`);
+    return true;
   }
 
   // Na grade, ao escolher uma área a ficha dela toma o lugar da trilha (e o painel
@@ -827,6 +1122,9 @@
     click(back);
     return !!(await waitFor(() => huntAreaNodes().length, 2500));
   }
+
+  // Os quadros da party são dos outros membros; a coroa (.slPartyCrown) marca o líder.
+  const partyLeaderIsOther = () => [...document.querySelectorAll('.slPartyFrame')].some((f) => visible(f) && f.querySelector('.slPartyCrown'));
 
   // Níveis dos outros membros da party (HUD: um .slPartyFrame por membro, com "Nv N").
   function partyLevels() {
@@ -855,7 +1153,7 @@
         const lv = b.querySelector('.slAtlasNodeLv');
         const t = `${lv ? lv.textContent : ''} ${b.getAttribute('aria-label') || ''}`;
         const m = t.match(/(\d+)\s*[^\d\s]{1,3}\s*(\d+)/);
-        return m ? { el: b, start: Number(m[1]), end: Number(m[2]), state: b.dataset.state || '' } : null;
+        return m ? { el: b, start: Number(m[1]), end: Number(m[2]), state: b.dataset.state || '', rec: !!b.querySelector('.slAtlasStar') } : null;
       })
       .filter(Boolean);
   }
@@ -877,6 +1175,21 @@
     return sealed ? 'locked' : 'current';
   }
 
+  // Clica e, se o jogo pedir confirmação (party, etc.), confirma só no diálogo novo.
+  async function clickConfirm(btn) {
+    const before = new Set(buttons());
+    click(btn);
+    await sleep(1200);
+    const confirm = buttons().find((b) => !before.has(b) && CONFIRM_WORDS.test(norm(b.innerText)));
+    if (confirm) {
+      const box = confirm.closest('[role="dialog"], [class*="Modal"], [class*="Confirm"], [class*="Dialog"]');
+      const msg = norm(box ? box.innerText : '').slice(0, 140);
+      click(confirm);
+      log(`Confirmei troca de área${msg ? ` ("${msg}")` : ''}.`);
+      await sleep(1200);
+    }
+  }
+
   async function enterSelectedArea(why) {
     const enter = findButton((t) => t === 'entrar no portal');
     // Nome da área: o título logo acima da linha "Portal Azul · Nv 21-25" do detalhe.
@@ -889,19 +1202,7 @@
       return name && name.length < 40 ? `${name} (${where})` : (where || 'área nova');
     })();
 
-    const before = new Set(buttons());
-    click(enter);
-    await sleep(1200);
-
-    // Se o jogo pedir confirmação (party, etc.), confirma só no diálogo novo.
-    const confirm = buttons().find((b) => !before.has(b) && CONFIRM_WORDS.test(norm(b.innerText)));
-    if (confirm) {
-      const box = confirm.closest('[role="dialog"], [class*="Modal"], [class*="Confirm"], [class*="Dialog"]');
-      const msg = norm(box ? box.innerText : '').slice(0, 140);
-      click(confirm);
-      log(`Confirmei troca de área${msg ? ` ("${msg}")` : ''}.`);
-      await sleep(1200);
-    }
+    await clickConfirm(enter);
     log(`Fui para ${title} (${why}).`);
     await sleep(800);
     await closePanels();
@@ -1011,6 +1312,14 @@
       const n = await buyItem(name, target);
       if (n) done.push(`${n} ${name}`);
     }
+    // As essências ficam na aba própria da loja; a compra rápida vai de 50 em 50 (máx. 2.000 por visita).
+    const essTab = document.querySelector('.slTab[data-tab="essences"]');
+    if (cfg.shopEssence > 0 && essTab) {
+      click(essTab);
+      await sleep(400);
+      const n = await buyItem('Essência de Extração', cfg.shopEssence);
+      if (n) done.push(`${n} Essência de Extração`);
+    }
     log(done.length ? `Loja do Brok: comprei ${done.join(', ')}.` : 'Loja do Brok: estoque já estava completo.');
     pressKey('Escape', 'Escape');
     await sleep(500);
@@ -1033,6 +1342,8 @@
   let lastMail = 0;
   let lastExped = 0;
   let lastEnchant = 0;
+  let lastStats = 0;
+  let lastImbue = 0;
   let mailSoon = 0;
 
   function readLevel() {
@@ -1086,6 +1397,10 @@
         lastEnchant = now;
         await doEnchant();
       }
+      if (cfg.autoImbue && (force || now - lastImbue > cfg.imbueEveryMin * 60000)) {
+        lastImbue = now;
+        await doImbue();
+      }
       // Expedições antes das Missões: enviar uma conta para o objetivo diário "Envie 1 expedição".
       if (cfg.autoExped && (force || now - lastExped > cfg.expedEveryMin * 60000)) {
         lastExped = now;
@@ -1111,6 +1426,7 @@
         lastHunt = now;
         await doHunt();
       }
+      if (now - lastStats > 3600000 && inHunt() && logStats()) lastStats = now;
     } catch (e) {
       log('Erro: ' + (e && e.message ? e.message : e));
       await closePanels().catch(() => {});
@@ -1136,7 +1452,8 @@
       cfg.deaths.push(now);
       saveCfg();
       log(`Morri (${cfg.deaths.length} em ${cfg.deathWindowMin} min).`);
-      if (cfg.enabled && cfg.deathGuard && cfg.deaths.length >= Math.max(1, cfg.deathLimit)) {
+      // Quem não é líder da party não desce sozinho (sairia da caçada do grupo).
+      if (cfg.enabled && cfg.deathGuard && !partyLeaderIsOther() && cfg.deaths.length >= Math.max(1, cfg.deathLimit)) {
         cfg.huntPauseUntil = now + Math.max(5, cfg.deathPauseMin) * 60000;
         cfg.deaths = [];
         saveCfg();
@@ -1192,10 +1509,29 @@
     for (const n of opts) {
       const o = document.createElement('option');
       o.value = n;
-      o.textContent = n || 'Primeira build da classe';
+      o.textContent = n || 'Build padrão da classe';
       if (norm(n) === norm(cfg.buildName)) o.selected = true;
       $buildSel.appendChild(o);
     }
+  }
+
+  // No IdleDeck o menu nativo do <select> abre atrás do painel. Então mostra um botão com o
+  // valor escolhido e abre a lista (o próprio <select size>) por cima, dentro do painel.
+  function dropdown(sel) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'dd';
+    const sync = () => { btn.textContent = `${sel.selectedOptions[0]?.textContent || '—'} ▾`; };
+    const close = () => { sel.classList.remove('show'); sync(); };
+    btn.addEventListener('click', () => {
+      for (const s of document.querySelectorAll('#lvlAutoRoot select.show')) if (s !== sel) s.classList.remove('show');
+      sel.classList.toggle('show');
+    });
+    sel.addEventListener('change', close);
+    sel.addEventListener('click', close); // clicar na opção que já estava escolhida também fecha
+    new MutationObserver(sync).observe(sel, { childList: true }); // as listas de build são recriadas
+    sel.before(btn);
+    sync();
   }
 
   function buildPanel() {
@@ -1206,10 +1542,14 @@
         #lvlAutoRoot{position:fixed;left:12px;bottom:12px;z-index:2147483647;font:12px/1.4 system-ui,sans-serif;color:#eee}
         #lvlAutoRoot .fab{background:#7c4dff;color:#fff;border:0;border-radius:6px;padding:6px 10px;font-weight:700;cursor:pointer;box-shadow:0 2px 8px #0008}
         #lvlAutoRoot .fab.on{background:#2ecc71;color:#06210f}
-        #lvlAutoRoot .box{display:none;margin-bottom:6px;width:280px;background:#15121f;border:1px solid #4b3a8a;border-radius:8px;padding:10px;box-shadow:0 4px 16px #000a}
+        #lvlAutoRoot .box{display:none;margin-bottom:6px;width:280px;max-width:calc(100vw - 24px);max-height:calc(100vh - 64px);overflow-y:auto;box-sizing:border-box;background:#15121f;border:1px solid #4b3a8a;border-radius:8px;padding:10px;box-shadow:0 4px 16px #000a}
         #lvlAutoRoot.open .box{display:block}
-        #lvlAutoRoot label{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0}
-        #lvlAutoRoot select,#lvlAutoRoot input[type=number]{background:#221c33;color:#eee;border:1px solid #4b3a8a;border-radius:4px;padding:2px 4px;max-width:150px}
+        #lvlAutoRoot label{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:5px 0;position:relative}
+        #lvlAutoRoot .dd{background:#221c33;color:#eee;border:1px solid #4b3a8a;border-radius:4px;padding:2px 6px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;text-align:left}
+        #lvlAutoRoot select[size]{display:none;position:absolute;right:0;top:100%;z-index:1;width:180px;max-width:none;box-shadow:0 4px 12px #000c}
+        #lvlAutoRoot select[size].show{display:block}
+        #lvlAutoRoot option:checked{background:#7c4dff linear-gradient(#7c4dff,#7c4dff);color:#fff}
+        #lvlAutoRoot select,#lvlAutoRoot input[type=number],#lvlAutoRoot input[type=text]{height:auto;background:#221c33;color:#eee;border:1px solid #4b3a8a;border-radius:4px;padding:2px 4px;max-width:150px}
         #lvlAutoRoot input[type=number]{width:56px}
         #lvlAutoRoot h4{margin:8px 0 2px;font-size:11px;letter-spacing:.06em;color:#b9a7ff;text-transform:uppercase}
         #lvlAutoRoot .row{display:flex;gap:6px;margin-top:8px}
@@ -1222,22 +1562,27 @@
         <div>Status: <span class="st"></span></div>
         <h4>Pontos de atributo</h4>
         <label>Distribuir sozinho<input type="checkbox" data-k="autoPoints"></label>
-        <label>Build<select data-k="buildName"></select></label>
+        <label>Build<select size="4" data-k="buildName"></select></label>
         <label>Mínimo de pontos<input type="number" min="1" max="500" data-k="minPoints"></label>
         <label>Checar a cada (min)<input type="number" min="2" max="240" data-k="pointsEveryMin"></label>
         <h4>Talentos</h4>
         <label>Investir sozinho<input type="checkbox" data-k="autoTalents"></label>
-        <label>Plano<select data-k="talentBuild"></select></label>
+        <label>Plano<select size="4" data-k="talentBuild"></select></label>
         <label>Checar a cada (min)<input type="number" min="5" max="240" data-k="talentsEveryMin"></label>
         <h4>Equipamento</h4>
         <label>Equipar melhores sozinho<input type="checkbox" data-k="autoEquip"></label>
-        <label>Critério<select data-k="criterion">${CRITERIA.map((c) => `<option value="${c.id}">${c.label}</option>`).join('')}</select></label>
+        <label>Critério<select size="4" data-k="criterion">${CRITERIA.map((c) => `<option value="${c.id}">${c.label}</option>`).join('')}</select></label>
         <label>A cada (min)<input type="number" min="2" max="240" data-k="equipEveryMin"></label>
         <label>Encantar vestidas (só garantido)<input type="checkbox" data-k="autoEnchant"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="enchantEveryMin"></label>
+        <label>Imbuir vestidas (nível I)<input type="checkbox" data-k="autoImbue"></label>
+        <label>A cada (min)<input type="number" min="15" max="720" data-k="imbueEveryMin"></label>
+        <label>Ordem do imbuimento<input type="text" data-k="imbueOrder"></label>
         <h4>Exército</h4>
         <label>Montar melhor time sozinho<input type="checkbox" data-k="autoTeam"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="teamEveryMin"></label>
+        <label>Equipar melhores nas sombras<input type="checkbox" data-k="shadowGear"></label>
+        <label>Vaga 6 para treinar sombra<input type="checkbox" data-k="shadowTrainee"></label>
         <h4>Recompensas</h4>
         <label>Resgatar Missões, Diária e Correio<input type="checkbox" data-k="autoRewards"></label>
         <label>A cada (min)<input type="number" min="5" max="240" data-k="rewardsEveryMin"></label>
@@ -1246,15 +1591,18 @@
         <h4>Caçada</h4>
         <label>Ir para a área recomendada<input type="checkbox" data-k="autoHunt"></label>
         <label>Checar a cada (min)<input type="number" min="5" max="240" data-k="huntEveryMin"></label>
+        <label>Comparar EXP/h com a área de baixo<input type="checkbox" data-k="expCompare"></label>
+        <label>Medir cada área por (min)<input type="number" min="5" max="120" data-k="expSampleMin"></label>
         <label>Descer de área após mortes<input type="checkbox" data-k="deathGuard"></label>
         <label>Mortes em 15 min para descer<input type="number" min="1" max="10" data-k="deathLimit"></label>
         <label>Ficar na área de baixo (min)<input type="number" min="5" max="480" data-k="deathPauseMin"></label>
         <h4>Loja do Brok</h4>
-        <label>Comprar poções e Revivers<input type="checkbox" data-k="autoShop"></label>
+        <label>Comprar poções, Revivers e essências<input type="checkbox" data-k="autoShop"></label>
         <label>A cada (horas)<input type="number" min="1" max="48" data-k="shopEveryHours"></label>
         <label>Poção Grande (manter)<input type="number" min="0" max="5000" data-k="shopHp"></label>
         <label>Mana Grande (manter)<input type="number" min="0" max="5000" data-k="shopMp"></label>
         <label>Reviver Grande (manter)<input type="number" min="0" max="500" data-k="shopRevive"></label>
+        <label>Essência de Extração (manter)<input type="number" min="0" max="2000" data-k="shopEssence"></label>
         <label>Reserva de ouro<input type="number" min="0" max="99999999" data-k="shopGoldReserve"></label>
         <div class="row"><button data-act="now">Rodar agora</button><button data-act="shop">Comprar agora</button><button data-act="clear">Limpar log</button></div>
         <pre></pre>
@@ -1281,11 +1629,12 @@
         saveCfg();
         paintFab();
         setStatus(cfg.enabled ? 'ligado' : 'desligado');
-        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; lastTalents = 0; lastRewards = 0; lastMail = 0; lastExped = 0; lastEnchant = 0; tick(false); }
+        if (k === 'enabled' && cfg.enabled) { lastEquip = 0; lastPoints = 0; lastTeam = 0; lastHunt = 0; lastTalents = 0; lastRewards = 0; lastMail = 0; lastExped = 0; lastEnchant = 0; lastImbue = 0; tick(false); }
       });
       // não deixar as teclas do painel virarem atalho do jogo
       el.addEventListener('keydown', (e) => e.stopPropagation());
     }
+    for (const s of root.querySelectorAll('select')) dropdown(s); // depois do valor salvo, para o botão já mostrar a escolha
     root.querySelector('[data-act="now"]').addEventListener('click', () => tick(true));
     root.querySelector('[data-act="shop"]').addEventListener('click', async () => {
       if (running) return;
